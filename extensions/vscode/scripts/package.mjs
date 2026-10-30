@@ -50,8 +50,6 @@ try {
       for (const suffix of ['txt', 'json']) await copy(`scripts/validation/compat-${arch}-${version}.${suffix}`);
     }
   }
-  await copy('scripts/proc-audit.py');
-  await copy('scripts/install-proc-audit.sh');
   for (const name of ['admin-audit-x64.txt', 'admin-audit-x64.json', 'admin-audit-arm64.txt', 'admin-audit-arm64.json', 'admin-audit-sha256.json']) {
     await copy(`scripts/validation/${name}`);
   }

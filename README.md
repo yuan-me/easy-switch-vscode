@@ -10,7 +10,11 @@
 2. 用 Remote-SSH 连接 Linux 服务器，在该窗口运行“Extensions: Install from VSIX...”。确认 Easy Switch 和官方 Codex 都安装在 SSH 服务器端。
 3. 重载窗口，在 Easy Switch 侧边栏添加服务商。接口需要支持 Responses API。
 
-安装包同时包含 Linux x64 和 ARM64 工具，服务器无需编译 Rust。当前支持的官方 Codex 版本和已完成的测试见 [兼容性说明](extensions/vscode/COMPATIBILITY.md)。完整的配置、管理员检查器和恢复步骤见 [使用说明](extensions/vscode/README.md)。
+安装包同时包含 Linux x64 和 ARM64 工具，服务器无需编译 Rust。当前支持的官方 Codex 版本和已完成的测试见 [兼容性说明](extensions/vscode/COMPATIBILITY.md)。完整的配置、手动停止提醒和恢复步骤见 [使用说明](extensions/vscode/README.md)。
+
+## 无需 sudo
+
+0.1.8 已移除全部进程检查和自动停止逻辑。切换、修复和恢复前会显示红色提醒，由用户手动停止当前及其他窗口、CLI 的 Codex 后端，再确认继续。插件不验证停写状态；仍有进程写入可能损坏聊天。文件校验、加密备份和回滚保留。
 
 ## 修复损坏聊天
 

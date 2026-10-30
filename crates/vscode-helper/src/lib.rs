@@ -10,8 +10,6 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use toml_edit::{DocumentMut, Item, Table, value};
 
-pub mod guard;
-
 pub const PROTOCOL_VERSION: u32 = 1;
 const PROVIDER: &str = "easy_switch_vscode";
 const OWNER_FILE: &str = ".easy-switch-vscode-owner.json";
@@ -608,15 +606,9 @@ pub fn execute(req: &Request, progress: &impl Fn(Progress)) -> Result<Value> {
     let req = resolve_request(req)?;
     match req.action.as_str() {
         "inspect" => inspect(&req),
-        "switch" => switch(&req, progress, &|| {
-            guard::ensure_stopped(&req.home, req.sqlite_home.as_deref())
-        }),
-        "recover" => recover(&req, &|| {
-            guard::ensure_stopped(&req.home, req.sqlite_home.as_deref())
-        }),
-        "repair" => repair(&req, progress, &|| {
-            guard::ensure_stopped(&req.home, req.sqlite_home.as_deref())
-        }),
+        "switch" => switch(&req, progress, &|| Ok(())),
+        "recover" => recover(&req, &|| Ok(())),
+        "repair" => repair(&req, progress, &|| Ok(())),
         _ => unreachable!(),
     }
 }

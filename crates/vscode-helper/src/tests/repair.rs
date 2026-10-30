@@ -37,7 +37,7 @@ fn explicit_repair_keeps_original_backup_and_enables_strict_switch() {
     let preview = confirmation(&mut f);
     assert_eq!(preview["repairPlan"]["fileCount"], 1);
     assert_eq!(fs::read(&f.rollout).unwrap(), bytes);
-    let result = crate::repair(&f.request, &|_| {}, &|| Ok(())).unwrap();
+    let result = execute(&f.request, &|_| {}).unwrap();
     assert_eq!(result["repairedFileCount"], 1);
     history::validate_records(&f.rollout, &CancellationToken::new()).unwrap();
     assert!(fs::read_to_string(&f.rollout).unwrap().contains(&f.body));

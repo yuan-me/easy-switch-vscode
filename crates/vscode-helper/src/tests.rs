@@ -396,6 +396,23 @@ fn interrupted_operation_remains_visible_even_if_live_config_is_invalid() {
 }
 
 #[test]
+fn public_switch_and_recovery_dispatch_without_process_audit() {
+    let mut f = Fixture::new();
+    f.select("a", "api-model");
+    assert_eq!(execute(&f.request, &|_| {}).unwrap()["committed"], true);
+    let operation = f.request.store_root.join("operations/manual-stop-test");
+    fs::create_dir(&operation).unwrap();
+    fs::write(
+        operation.join("manifest.json"),
+        r#"{"state":"Applying","description":"Synthetic interruption","files":[]}"#,
+    )
+    .unwrap();
+    f.request.action = "recover".into();
+    f.request.operation_id = Some("manual-stop-test".into());
+    assert_eq!(execute(&f.request, &|_| {}).unwrap()["committed"], true);
+}
+
+#[test]
 fn another_store_cannot_inspect_switch_or_recover_an_owned_home() {
     let mut f = Fixture::new();
     f.request.action = "inspect".into();

@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 const fs = require('node:fs/promises');
 const helper = require('../out/helper');
-const backend = require('../out/backend');
 const environment = require('../out/environment');
 const { ProviderStore } = require('../out/storage');
 
@@ -13,12 +12,12 @@ const pending = [{ id: 'operation-one', description: '中断切换', state: 'App
 const repairPlan = { fingerprint: 'a'.repeat(64), fileCount: 1, items: [{ path: '/synthetic/rollout.jsonl', line: 4, detail: '图片无法恢复，保留原件备份', missingImage: true }] };
 
 async function host(options, check) {
-  const optionsHost = options;
   const values = new Map(), secrets = new Map(), commands = new Map(), events = [], messages = [], inputs = [];
   const state = { get: key => values.get(key), update: async (key, value) => { values.set(key, structuredClone(value)); } };
   const secretStorage = { get: async key => secrets.get(key), store: async (key, value) => { secrets.set(key, value); }, delete: async key => { secrets.delete(key); } };
   const store = await ProviderStore.open(state, secretStorage, home);
   await store.save(provider, 'test-key');
+  await store.journalKey();
   let repaired = false;
   let view, phase = options.pending ? 'pending' : 'ready', activated = 0, inspections = 0;
   const snapshot = () => ({ type: 'result', protocolVersion: 1, home, sqliteHome: options.removeSqliteConfig && inspections > 1 ? options.envSqlite ?? null : '/data/sqlite', activeProviderId: 'official', officialModel: options.officialModel === undefined ? 'official-model' : options.officialModel, configFingerprint: phase === 'pending' ? null : 'fingerprint', sessionCount: phase === 'pending' ? null : 2, operations: phase === 'pending' ? pending : [], repairPlan: repaired ? undefined : options.repairPlan });
@@ -39,7 +38,7 @@ async function host(options, check) {
     window: {
       createStatusBarItem: () => ({ show() {}, dispose() {} }),
       registerTreeDataProvider: (_, provider) => { view = provider; return new Disposable(); },
-      showWarningMessage: async (message, options) => { messages.push(message); if (options?.detail) events.push({ detail: options.detail }); return message.startsWith('切换到') ? '切换并重载' : message.startsWith('修复聊天') && optionsHost.acceptRepair ? '备份、修复并重载' : undefined; },
+      showWarningMessage: async (message, options) => { messages.push(message); if (options?.detail) events.push({ detail: options.detail }); return undefined; },
       showErrorMessage: async (message, ...actions) => { messages.push(message); events.push({ errorActions: actions }); },
       showInformationMessage: async message => { messages.push(message); },
       showQuickPick: async items => items.find(item => item.provider?.id === provider.id),
@@ -47,11 +46,12 @@ async function host(options, check) {
       withProgress: async (_, callback) => callback({ report() {} })
     }
   };
-  const saved = { load: Module._load, access: fs.access, run: helper.runHelper, stop: backend.stopBackend, discover: environment.discoverTarget, platform: Object.getOwnPropertyDescriptor(process, 'platform') };
+  const saved = { load: Module._load, access: fs.access, run: helper.runHelper, discover: environment.discoverTarget, platform: Object.getOwnPropertyDescriptor(process, 'platform') };
   Module._load = function(name, ...args) { return name === 'vscode' ? vscode : saved.load.call(this, name, ...args); };
   fs.access = async () => {};
   environment.discoverTarget = async () => ({ home, ...(options.envSqlite ? { sqliteHome: options.envSqlite } : {}) });
-  backend.stopBackend = async () => { events.push('stop'); if (options.stopFails) throw Error('无法检查服务器 PID 3133'); return true; };
+  const manual = require('../out/manualStop'), savedConfirm = manual.confirmManualStop;
+  manual.confirmManualStop = async (title, detail) => { events.push('confirm'); events.push({ detail }); return title.startsWith('修复聊天') ? !!options.acceptRepair : !options.cancelConfirmation; };
   helper.runHelper = async (_, request) => {
     if (request.action === 'inspect') { inspections++; events.push({ inspect: structuredClone(request) }); return snapshot(); }
     events.push({ mutation: structuredClone(request) });
@@ -68,17 +68,17 @@ async function host(options, check) {
     await activate(context);
     await check({ commands, events, messages, inputs, view, workspace: vscode.workspace, get activated() { return activated; } });
   } finally {
-    Module._load = saved.load; fs.access = saved.access; helper.runHelper = saved.run; backend.stopBackend = saved.stop; environment.discoverTarget = saved.discover;
+    manual.confirmManualStop = savedConfirm; Module._load = saved.load; fs.access = saved.access; helper.runHelper = saved.run; environment.discoverTarget = saved.discover;
     Object.defineProperty(process, 'platform', saved.platform);
     delete require.cache[require.resolve('../out/extension')];
   }
 }
 
-test('target validation precedes backend stop and displays inspected directory without inventing env override', () => host({}, async ({ commands, events, view }) => {
+test('target validation precedes manual confirmation and displays inspected directory without inventing env override', () => host({}, async ({ commands, events, view }) => {
   assert.ok(view.getChildren().some(row => String(row.tooltip).includes('/data/sqlite')));
   await commands.get('easySwitch.switchProvider')({ provider });
   const targetIndex = events.findIndex(e => e.inspect?.provider);
-  const stopIndex = events.indexOf('stop');
+  const stopIndex = events.indexOf('confirm');
   assert.ok(targetIndex >= 0 && targetIndex < stopIndex);
   assert.equal(events[targetIndex].inspect.apiKey, 'test-key');
   const mutation = events.find(e => e.mutation)?.mutation;
@@ -94,8 +94,21 @@ test('repair preview can be cancelled without stopping or mutating histories', (
   assert.ok(view.getChildren().some(row => row.command?.command === 'easySwitch.repairHistories'));
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.ok(events.some(e => e.detail?.includes('这不是无损修复')));
-  assert.ok(!events.includes('stop'));
+  assert.ok(events.includes('confirm'));
   assert.ok(!events.some(e => e.mutation || e.inspect?.apiKey));
+}));
+
+test('recovery requires the manual-stop confirmation and can be cancelled', () => host({ pending: true, cancelConfirmation: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.recover')();
+  assert.ok(events.includes('confirm'));
+  assert.ok(!events.some(e => e.mutation));
+}));
+
+test('confirmed recovery runs without process management and reloads', () => host({ pending: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.recover')();
+  const mutation = events.findIndex(e => e.mutation?.action === 'recover');
+  assert.ok(mutation > events.indexOf('confirm'));
+  assert.equal(events.at(-1), 'reload');
 }));
 
 test('confirmed repair binds the preview, sends no provider secret and reloads before switching', () => host({ repairPlan, acceptRepair: true }, async ({ commands, events }) => {
@@ -108,7 +121,7 @@ test('confirmed repair binds the preview, sends no provider secret and reloads b
   assert.equal(mutations[0].apiKey, undefined);
   assert.equal(mutations[0].provider, undefined);
   assert.ok(mutations[0].journalKey);
-  assert.ok(events.indexOf('stop') < events.findIndex(e => e.mutation));
+  assert.ok(events.indexOf('confirm') < events.findIndex(e => e.mutation));
   assert.equal(events.at(-1), 'reload');
 }));
 
@@ -119,20 +132,20 @@ test('repair failure blocks reload until the interrupted operation is recovered'
   assert.ok(!events.includes('reload'));
 }));
 
-test('unknown official model can be cancelled before preflight or backend stop', () => host({ officialModel: null }, async ({ commands, events, inputs }) => {
+test('unknown official model can be cancelled before preflight or manual confirmation', () => host({ officialModel: null }, async ({ commands, events, inputs }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.equal(inputs.length, 1);
   assert.equal(inputs[0].prompt, '切回官方时使用的模型 ID（在 Codex 模型选择器查看）');
-  assert.ok(!events.includes('stop'));
+  assert.ok(!events.includes('confirm'));
   assert.ok(!events.some(e => e.inspect?.provider || e.mutation));
 }));
 
-test('official model confirmation persists across failed stop and refresh, without a second prompt', () => host({ officialModel: null, modelInput: 'official-model-id', stopFails: true }, async ({ commands, events, inputs }) => {
+test('official model confirmation persists across cancelled confirmation and refresh, without a second prompt', () => host({ officialModel: null, modelInput: 'official-model-id', cancelConfirmation: true }, async ({ commands, events, inputs }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
   await commands.get('easySwitch.refresh')();
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.equal(inputs.length, 1);
-  assert.equal(events.filter(e => e === 'stop').length, 2);
+  assert.equal(events.filter(e => e === 'confirm').length, 2);
   assert.ok(!events.some(e => e.mutation));
   assert.ok(events.filter(e => e.inspect?.provider).every(e => e.inspect.officialModel === 'official-model-id'));
 }));
@@ -143,7 +156,7 @@ test('official row edits fallback model without overriding the server configured
   assert.equal(inputs.length, 1);
   assert.equal(events.find(e => e.mutation).mutation.officialModel, 'official-model');
 }));
-test('official model input is validated before stop and included in preflight and mutation', () => host({ officialModel: null, modelInput: '  official-model-id  ' }, async ({ commands, events, inputs }) => {
+test('official model input is validated before confirmation and included in preflight and mutation', () => host({ officialModel: null, modelInput: '  official-model-id  ' }, async ({ commands, events, inputs }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
   const validation = inputs[0].validateInput;
   assert.ok(validation(''));
@@ -154,12 +167,12 @@ test('official model input is validated before stop and included in preflight an
   assert.equal(validation('a'.repeat(200)), undefined);
   assert.equal(events.find(e => e.inspect?.provider).inspect.officialModel, 'official-model-id');
   assert.equal(events.find(e => e.mutation).mutation.officialModel, 'official-model-id');
-  assert.ok(events.indexOf('modelInput') < events.indexOf('stop'));
+  assert.ok(events.indexOf('modelInput') < events.indexOf('confirm'));
 }));
-test('invalid official model returned by input cannot reach backend stop', () => host({ officialModel: null, modelInput: 'bad\nmodel' }, async ({ commands, events, messages }) => {
+test('invalid official model returned by input cannot reach manual confirmation', () => host({ officialModel: null, modelInput: 'bad\nmodel' }, async ({ commands, events, messages }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.ok(messages.some(message => message.includes('控制字符')));
-  assert.ok(!events.includes('stop'));
+  assert.ok(!events.includes('confirm'));
   assert.ok(!events.some(e => e.mutation));
 }));
 test('removing sqlite_home from config does not leave a stale effective directory in later requests', () => host({ removeSqliteConfig: true }, async ({ commands, events }) => {
@@ -194,21 +207,21 @@ test('startup with interrupted operation does not activate Codex or offer a norm
   assert.equal(activated, 0);
   assert.ok(view.getChildren().some(row => String(row.label).includes('待恢复')));
   await commands.get('easySwitch.switchProvider')({ provider });
-  assert.ok(!events.includes('stop'));
+  assert.ok(!events.includes('confirm'));
   assert.ok(!events.some(e => e.mutation));
 }));
 for (const version of ['26.1021.22027', '26.1007.21434', '26.1002.51308', '26.51021.22027']) {
-  test(`validated Codex ${version} completes preflight, stop, mutation and reload`, () => host({ version }, async ({ commands, events, messages }) => {
+  test(`validated Codex ${version} completes preflight, confirmation, mutation and reload`, () => host({ version }, async ({ commands, events, messages }) => {
     await commands.get('easySwitch.switchProvider')({ provider });
-    const stop = events.indexOf('stop'), mutation = events.findIndex(e => e.mutation), reload = events.indexOf('reload');
+    const stop = events.indexOf('confirm'), mutation = events.findIndex(e => e.mutation), reload = events.indexOf('reload');
     assert.ok(stop >= 0 && mutation > stop && reload > mutation, JSON.stringify({ events, messages }));
     assert.equal(events.filter(e => e.mutation).length, 1);
   }));
 }
-test('unknown official version is rejected before stopping backend', () => host({ version: '99.0.0' }, async ({ commands, events, messages }) => {
+test('unknown official version is rejected before confirmation', () => host({ version: '99.0.0' }, async ({ commands, events, messages }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.ok(messages.some(message => message.includes('尚未通过兼容测试')));
-  assert.ok(!events.includes('stop'));
+  assert.ok(!events.includes('confirm'));
   assert.ok(!events.some(e => e.mutation));
 }));
 test('reload failure reports committed configuration and does not run another mutation', () => host({ reloadFails: true }, async ({ commands, events, messages }) => {

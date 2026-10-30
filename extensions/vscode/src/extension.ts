@@ -4,7 +4,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { absolutePath, discoverTarget, type Target } from './environment';
-import { stopBackend, supportedCodexVersions } from './backend';
+import { supportedCodexVersions } from './compatibility';
+import { confirmManualStop, stopWarning } from './manualStop';
 import { runHelper, type HelperRequest, type HelperResult, type Operation } from './helper';
 import { ProviderStore, official, validateProvider, validateOfficialModel, type Provider } from './storage';
 import { registerUpdates } from './updates';
@@ -33,7 +34,6 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   private error?: string;
   private progress?: string;
   private busy = false;
-  private stopped = false;
   private reloadPending = false;
   private operationUncertain = false;
   private promptedRecovery = false;
@@ -52,6 +52,9 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     rows[0]!.iconPath = new vscode.ThemeIcon('remote');
     rows[1]!.iconPath = new vscode.ThemeIcon('folder');
     rows[1]!.tooltip = `Codex 数据目录：${this.ready.target.home}\n数据库：${this.ready.target.sqliteHome ?? `${this.ready.target.home}/sqlite`}\n使用此目录的其他 Codex 窗口和 CLI 也会使用这份配置。`;
+    const warning = new Row('操作前请手动停止 Codex · 未检查占用');
+    warning.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'));
+    warning.tooltip = stopWarning; rows.push(warning);
     if (this.result.repairPlan) {
       const children = this.result.repairPlan.items.map(item => {
         const row = new Row(`${path.basename(item.path)} · 第 ${item.line} 行`);
@@ -67,8 +70,8 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
       action.iconPath = new vscode.ThemeIcon('tools'); rows.push(action);
     }
     if (this.progress) { const p = new Row(this.progress); p.iconPath = new vscode.ThemeIcon('loading~spin'); rows.push(p); }
-    if ((this.reloadPending || this.stopped) && !this.operationUncertain && !this.result.operations?.some(unfinished)) {
-      const reload = new Row(this.reloadPending ? '操作已完成，点击重载窗口' : 'Codex 已停止，点击重载窗口');
+    if (this.reloadPending && !this.operationUncertain && !this.result.operations?.some(unfinished)) {
+      const reload = new Row('操作已完成，点击重载窗口');
       reload.iconPath = new vscode.ThemeIcon('refresh');
       reload.command = { command: 'easySwitch.reload', title: '重载窗口' };
       rows.push(reload);
@@ -109,7 +112,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
         } catch { /* Keep reload blocked until the operation state can be inspected. */ }
       }
       const message = error instanceof Error ? error.message : '操作失败，请刷新检查状态。';
-      const canReload = this.stopped && !this.operationUncertain && !this.result?.operations?.some(unfinished);
+      const canReload = this.reloadPending && !this.operationUncertain && !this.result?.operations?.some(unfinished);
       const action = await vscode.window.showErrorMessage(message, ...(canReload ? ['重载 Codex'] : []));
       if (action === '重载 Codex') await this.reload();
     } finally {
@@ -206,18 +209,17 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (!action) return;
     await ready.store.remove(provider.id); this.update();
   }
-  private supported(ready: Ready): string {
+  private supported(ready: Ready): void {
     const version: unknown = ready.codex.packageJSON.version;
     if (typeof version !== 'string' || !supportedCodexVersions.has(version)) throw new Error(`当前服务器上的 Codex 版本（${typeof version === 'string' ? version : '未知'}）尚未通过兼容测试。请使用以下版本：${[...supportedCodexVersions].join('、')}。未修改任何配置或聊天。`);
     if (vscode.workspace.getConfiguration('chatgpt').get<string>('cliExecutable')) throw new Error('当前 Codex 使用自定义 CLI，无法确认后端归属。请恢复官方内置 CLI 后重试。');
-    return path.join(ready.codex.extensionPath, 'bin', process.arch === 'arm64' ? 'linux-aarch64' : 'linux-x86_64', 'codex');
   }
   async switch(row?: Row): Promise<void> {
     if (this.result?.repairPlan) { await this.repairHistories(); return; }
     const provider = await this.choose(row);
     if (!provider) return;
     const ready = this.requireReady();
-    const executable = this.supported(ready);
+    this.supported(ready);
     const apiKey = provider.id === 'official' ? undefined : await ready.store.key(provider.id);
     if (provider.id !== 'official' && !apiKey) throw new Error('当前客户端没有该服务商的密钥，请编辑服务商重新输入。');
     if (this.result?.operations?.some(unfinished)) throw new Error('存在未完成的切换，请先运行“恢复中断的切换”。');
@@ -235,12 +237,12 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (!configFingerprint) throw new Error('切换工具没有返回配置指纹，无法安全提交。');
     officialModel = before.officialModel ?? officialModel;
     this.update();
-    const accepted = await vscode.window.showWarningMessage(`切换到“${provider.name}”并重载 VS Code？`, { modal: true, detail: `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n请先结束正在生成的任务。切换会停止当前窗口的 Codex、迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。` }, '切换并重载');
+    const accepted = await confirmManualStop(`切换到“${provider.name}”并重载 VS Code？`, `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n切换会迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。`, '切换并重载');
     if (!accepted) return;
     const journalKey = await ready.store.journalKey();
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Easy Switch', cancellable: false }, async progress => {
-      this.progress = '正在停止 Codex'; this.update(); progress.report({ message: this.progress });
-      this.stopped = await stopBackend(ready.target.home, executable, process.pid, ready.target.sqliteHome) || this.stopped;
+      this.progress = '正在备份并切换'; this.update(); progress.report({ message: this.progress });
+
       this.operationUncertain = true;
       const result = await runHelper(ready.binary, { ...this.request(ready, 'switch'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, journalKey, expectedConfigFingerprint: configFingerprint, officialModel }, event => {
         this.progress = `${event.stage}：${event.detail}`; this.update(); progress.report({ message: this.progress });
@@ -258,17 +260,16 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   }
   async recover(): Promise<void> {
     const ready = this.requireReady();
-    const executable = this.supported(ready);
+    this.supported(ready);
     const snapshot = await runHelper(ready.binary, this.request(ready, 'inspect'));
     this.adoptTarget(ready, snapshot);
     const pending = snapshot.operations?.filter(unfinished) ?? [];
     if (!pending.length) { this.result = snapshot; void vscode.window.showInformationMessage('没有需要恢复的操作。'); return; }
     const choice = pending.length === 1 ? pending[0] : (await vscode.window.showQuickPick(pending.map(operation => ({ label: operation.description, description: operation.state, operation })), { title: '选择要恢复的操作' }))?.operation;
     if (!choice) return;
-    const accepted = await vscode.window.showWarningMessage('恢复中断前的配置和会话，然后重载窗口？', { modal: true, detail: '请先结束正在生成的任务。恢复会校验备份和现有文件；发生外部修改时将停止，不覆盖新的内容。' }, '恢复并重载');
+    const accepted = await confirmManualStop('恢复中断前的配置和会话，然后重载窗口？', `服务器：${os.hostname()}\n目录：${ready.target.home}\n\n恢复会校验备份和现有文件；发生外部修改时将停止，不覆盖新的内容。`, '恢复并重载');
     if (!accepted) return;
     const journalKey = await ready.store.journalKey(false);
-    this.stopped = await stopBackend(ready.target.home, executable, process.pid, ready.target.sqliteHome) || this.stopped;
     this.operationUncertain = true;
     const result = await runHelper(ready.binary, { ...this.request(ready, 'recover'), operationId: choice.id, journalKey }, event => { this.progress = `${event.stage}：${event.detail}`; this.update(); });
     if (!result.committed) throw new Error('恢复结果尚未确认。请刷新并检查待恢复的操作。');
@@ -277,7 +278,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   }
   async repairHistories(): Promise<void> {
     const ready = this.requireReady();
-    const executable = this.supported(ready);
+    this.supported(ready);
     const snapshot = await runHelper(ready.binary, this.request(ready, 'inspect'));
     this.adoptTarget(ready, snapshot); this.result = snapshot; this.update();
     if (snapshot.operations?.some(unfinished)) throw new Error('先恢复中断操作，再修复聊天记录。');
@@ -285,12 +286,11 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (!plan) { void vscode.window.showInformationMessage('没有发现需要修复的记录。'); return; }
     if (!snapshot.configFingerprint) throw new Error('缺少配置指纹，不能修复。');
     const missing = plan.items.filter(i => i.missingImage).length;
-    const accepted = await vscode.window.showWarningMessage('修复聊天记录并重载窗口？', { modal: true, detail:
-      `服务器：${os.hostname()}\n目录：${ready.target.home}\n涉及 ${plan.fileCount} 个聊天文件、${plan.items.length} 处异常，逐项说明见侧边栏。\n\n完整记录保留原字节。截断残片保存在加密原件备份中；修复副本使用可核实的完整记录，不猜补未知内容。${missing ? `\n有 ${missing} 处图片及尾部内容无法恢复：将保留工具调用 ID 和文字，用明确修复说明替代损坏图片。这不是无损修复。` : ''}\n\n请先结束生成任务。操作会停止 Codex、加密保留原件，再用修复副本替换活动聊天文件；校验失败则回滚。修复不更换服务商，重载后再点击目标服务商切换。` }, '备份、修复并重载');
-    if (accepted !== '备份、修复并重载') return;
+    const accepted = await confirmManualStop('修复聊天记录并重载窗口？',
+      `服务器：${os.hostname()}\n目录：${ready.target.home}\n涉及 ${plan.fileCount} 个聊天文件、${plan.items.length} 处异常，逐项说明见侧边栏。\n\n完整记录保留原字节。截断残片保存在加密原件备份中；修复副本使用可核实的完整记录，不猜补未知内容。${missing ? `\n有 ${missing} 处图片及尾部内容无法恢复：将保留工具调用 ID 和文字，用明确修复说明替代损坏图片。这不是无损修复。` : ''}\n\n操作会加密保留原件，再用修复副本替换活动聊天文件；校验失败则回滚。修复不更换服务商，重载后再点击目标服务商切换。`, '备份、修复并重载');
+    if (!accepted) return;
     const journalKey = await ready.store.journalKey();
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Easy Switch · 修复聊天', cancellable: false }, async progress => {
-      this.stopped = await stopBackend(ready.target.home, executable, process.pid, ready.target.sqliteHome) || this.stopped;
       this.operationUncertain = true;
       const result = await runHelper(ready.binary, { ...this.request(ready, 'repair'), journalKey,
         expectedConfigFingerprint: snapshot.configFingerprint!, repairFingerprint: plan.fingerprint }, event => {
