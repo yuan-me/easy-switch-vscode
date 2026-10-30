@@ -39,6 +39,13 @@ pub struct Manifest {
     pub description: String,
     #[serde(alias = "Files")]
     pub files: Vec<Change>,
+    #[serde(default)]
+    pub retain_backups: bool,
+}
+impl Manifest {
+    fn retained(&self) -> bool {
+        self.retain_backups && matches!(self.state.as_str(), "Complete" | "Restored")
+    }
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +102,33 @@ fn remove_operation(dir: &Path) -> Result<()> {
         fs::remove_file(manifest)?;
     }
     fs::remove_dir(dir)?;
+    Ok(())
+}
+
+fn cleanup_operation(dir: &Path, m: &Manifest) -> Result<()> {
+    if !m.retained() {
+        return remove_operation(dir);
+    }
+    crate::sessions::no_links(dir)?;
+    // A crash can leave plaintext rewrite/SQLite scratch files beside encrypted payloads.
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if [".jsonl", ".db", ".db-wal", ".db-shm", ".db-journal"]
+            .iter()
+            .any(|suffix| {
+                name.strip_suffix(suffix)
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+            })
+        {
+            crate::sessions::no_links(&entry.path())?;
+            ensure!(
+                entry.file_type()?.is_file(),
+                "临时文件路径不是普通文件，未清理"
+            );
+            fs::remove_file(entry.path())?;
+        }
+    }
     Ok(())
 }
 
@@ -161,7 +195,7 @@ fn cleanup_locked(root: &Path, allowed: &[PathBuf]) -> Result<()> {
             // Preparing is persisted before staging; no target is written before Applying.
             if finished(&m.state) || m.state == "Preparing" {
                 cleanup_temps(&m, allowed)?;
-                remove_operation(&dir)?;
+                cleanup_operation(&dir, &m)?;
             }
             Ok(())
         })();
@@ -305,6 +339,7 @@ impl Journal {
                 state: "Preparing".into(),
                 description: description.into(),
                 files: vec![],
+                retain_backups: false,
             },
             _lock: lock,
         };
@@ -317,6 +352,10 @@ impl Journal {
             &serde_json::to_vec_pretty(&self.manifest)?,
         )
     }
+    pub fn retain_backups(&mut self) -> Result<()> {
+        self.manifest.retain_backups = true;
+        self.save()
+    }
     pub fn stage(&mut self, path: &Path, data: Option<&[u8]>) -> Result<()> {
         self.stage_reader(
             path,
@@ -327,8 +366,21 @@ impl Journal {
         )
     }
     pub fn stage_file(&mut self, path: &Path, source: &Path) -> Result<()> {
+        self.stage_file_inner(path, source, None)
+    }
+    fn stage_file_inner(
+        &mut self,
+        path: &Path,
+        source: &Path,
+        expected_before: Option<&Option<String>>,
+    ) -> Result<()> {
         crate::sessions::no_links(path)?;
         let before = hash(path)?;
+        ensure!(
+            expected_before.is_none_or(|expected| expected == &before),
+            "生成迁移副本后源文件发生变化，停止提交：{}",
+            path.display()
+        );
         let after = hash(source)?;
         let mut reader = File::open(source)?;
         if before.is_some() && before != after {
@@ -357,6 +409,15 @@ impl Journal {
         }
         reader.rewind()?;
         self.stage_reader(path, Some(Box::new(reader)), after, None, Some(&before))
+    }
+    /// Bind a generated rewrite to the source version from which it was produced.
+    pub fn stage_file_from_snapshot(
+        &mut self,
+        path: &Path,
+        source: &Path,
+        expected_before: &Option<String>,
+    ) -> Result<()> {
+        self.stage_file_inner(path, source, Some(expected_before))
     }
     fn stage_reader(
         &mut self,
@@ -518,7 +579,7 @@ impl Drop for Journal {
             }
         }
         if finished(&self.manifest.state) {
-            if let Err(e) = remove_operation(&self.dir) {
+            if let Err(e) = cleanup_operation(&self.dir, &self.manifest) {
                 eprintln!("操作副本清理未完成，下次启动重试：{e}");
             }
         }
@@ -712,5 +773,5 @@ pub fn restore_with_guard(
     rollback_manifest(&dir, &mut m, guard)?;
     atomic_write(&path, &serde_json::to_vec_pretty(&m)?)?;
     cleanup_temps(&m, allowed)?;
-    remove_operation(&dir)
+    cleanup_operation(&dir, &m)
 }

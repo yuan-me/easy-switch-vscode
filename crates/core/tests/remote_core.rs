@@ -17,6 +17,87 @@ fn initialize_crypto() {
     crypto::set_session_key([0x42; 32]).unwrap();
 }
 
+#[test]
+fn stale_rewrite_must_not_replace_later_appends() {
+    initialize_crypto();
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("history.jsonl");
+    let staged = temp.path().join("staged.jsonl");
+    let original = b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread\",\"model_provider\":\"openai\"}}\n";
+    fs::write(&path, original).unwrap();
+    let snapshot = journal::hash(&path).unwrap();
+    sessions::patch_metadata(&path, &staged, "model_provider", "api").unwrap();
+    let concurrent = [
+        original.as_slice(),
+        b"{\"type\":\"event_msg\",\"payload\":{\"message\":\"new message\"}}\n",
+    ]
+    .concat();
+    fs::write(&path, &concurrent).unwrap();
+    let mut j = Journal::new(&temp.path().join("store"), "snapshot race").unwrap();
+    let result = j
+        .stage_file_from_snapshot(&path, &staged, &snapshot)
+        .and_then(|_| j.commit());
+    assert!(
+        result.is_err(),
+        "stale rewrite silently discarded the newer message"
+    );
+    assert_eq!(fs::read(&path).unwrap(), concurrent);
+}
+
+#[test]
+fn retained_backups_survive_rollback_recovery_and_cleanup() {
+    initialize_crypto();
+    for interrupted in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("store");
+        let path = temp.path().join("history.jsonl");
+        fs::write(&path, b"original bytes").unwrap();
+        let mut j = Journal::new(&store, "retained recovery").unwrap();
+        j.retain_backups().unwrap();
+        j.stage(&path, Some(b"replacement")).unwrap();
+        let dir = j.dir.clone();
+        let backup = j.manifest.files[0].backup.clone().unwrap();
+        let scratch: Vec<_> = ["jsonl", "db", "db-wal", "db-shm", "db-journal"]
+            .iter()
+            .map(|ext| dir.join(format!("{}.{}", uuid::Uuid::new_v4(), ext)))
+            .collect();
+        for path in &scratch {
+            fs::write(path, b"plaintext scratch").unwrap();
+        }
+        fs::write(dir.join("keep-note.txt"), b"unrelated note").unwrap();
+        if interrupted {
+            j.manifest.state = "Applying".into();
+            fs::write(
+                dir.join("manifest.json"),
+                serde_json::to_vec(&j.manifest).unwrap(),
+            )
+            .unwrap();
+            fs::write(&path, b"replacement").unwrap();
+            drop(j);
+            journal::restore(
+                &store,
+                dir.file_name().unwrap().to_str().unwrap(),
+                &[temp.path().to_owned()],
+            )
+            .unwrap();
+        } else {
+            assert!(j.commit_with_fault(Some(0)).is_err());
+            drop(j);
+        }
+        journal::cleanup(&store, &[temp.path().to_owned()]).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"original bytes");
+        assert!(scratch.iter().all(|path| !path.exists()));
+        assert!(dir.join("keep-note.txt").exists());
+        assert!(dir.join("manifest.json").exists());
+        let mut bytes = Vec::new();
+        easy_switch_core::crypto::decrypt_file(&backup, &mut bytes).unwrap();
+        assert_eq!(bytes, b"original bytes");
+        // Retained completed operations must not block the next transaction.
+        let _next = Journal::new(&store, "next transaction").unwrap();
+        assert!(backup.exists());
+    }
+}
+
 fn settings_event(
     id: &str,
     cwd: &std::path::Path,

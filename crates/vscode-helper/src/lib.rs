@@ -615,7 +615,10 @@ pub fn execute(req: &Request, progress: &impl Fn(Progress)) -> Result<Value> {
 }
 
 fn inspect(req: &Request) -> Result<Value> {
-    let operations = journal::list(&req.store_root.join("operations"), false)?;
+    let operations: Vec<_> = journal::list(&req.store_root.join("operations"), false)?
+        .into_iter()
+        .filter(|op| !journal::finished(&op.state))
+        .collect();
     if operations.iter().any(|op| !journal::finished(&op.state)) {
         // A partial commit may contain mismatched indexes or TOML; recovery must remain reachable.
         return Ok(
@@ -689,6 +692,7 @@ fn switch(
                 })?,
             )
         })?;
+    j.retain_backups()?;
     let scan = sessions::Scanner::default().scan_with_progress(&settings, &ct, progress)?;
     ensure!(
         scan.warnings.is_empty(),

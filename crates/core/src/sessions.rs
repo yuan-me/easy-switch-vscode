@@ -583,7 +583,7 @@ pub fn patch_metadata(source: &Path, dest: &Path, key: &str, value: &str) -> Res
             end -= 1;
         }
         if end > start {
-            let mut node: Value = serde_json::from_slice(&line[start..end])?;
+            let mut node = crate::history::parse_record(&line, source, ordinal + 1)?;
             if node["type"] == "session_meta" {
                 if let Some(owner) = &metadata {
                     ensure!(
@@ -671,7 +671,7 @@ pub fn stage_database(
         if journal::hash(&tmp)? == snapshot_before {
             return Ok(());
         }
-        j.stage_file(path, &tmp)
+        j.stage_file_from_snapshot(path, &tmp, &before)
     })();
     let _ = fs::remove_file(tmp);
     result
@@ -809,6 +809,7 @@ fn stage_changes_inner(
                 }
                 let temp = j.dir.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
                 let result = (|| {
+                    let before = journal::hash(&path)?;
                     patch_metadata(
                         &path,
                         &temp,
@@ -822,7 +823,7 @@ fn stage_changes_inner(
                     if let Some(event) = projection_events.get(&path_key(&path)?) {
                         crate::history::append_projection_event(&temp, event)?;
                     }
-                    j.stage_file(&path, &temp)
+                    j.stage_file_from_snapshot(&path, &temp, &before)
                 })();
                 let _ = fs::remove_file(temp);
                 result?;

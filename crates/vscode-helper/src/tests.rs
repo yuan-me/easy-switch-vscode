@@ -84,6 +84,91 @@ impl Fixture {
 }
 
 #[test]
+fn corrupt_history_reports_physical_line_without_writing_or_disclosing_body() {
+    for bad in [
+        b"{\"text\":\"PRIVATE_CANARY\n".as_slice(),
+        b"{\"text\":\"PRIVATE_CANARY\", broken}\n".as_slice(),
+        b"{\"text\":\"PRIVATE_CANARY\xff\"}\n".as_slice(),
+    ] {
+        let mut f = Fixture::new();
+        f.select("a", "api-model");
+        let mut damaged = fs::read(&f.rollout).unwrap();
+        for _ in 0..42 {
+            damaged.extend_from_slice(b"{\"type\":\"event_msg\",\"payload\":{}}\n");
+        }
+        let line = damaged.iter().filter(|b| **b == b'\n').count() + 1;
+        damaged.extend_from_slice(bad);
+        damaged.extend_from_slice(b"{\"type\":\"event_msg\",\"payload\":{}}\n");
+        fs::write(&f.rollout, &damaged).unwrap();
+        let config = fs::read(f.request.home.join("config.toml")).unwrap();
+        let database = fs::read(f.request.home.join("state_5.sqlite")).unwrap();
+        let error = inspect(&f.request).unwrap_err().to_string();
+        assert!(
+            error.contains(
+                &sessions::normalize(&f.rollout)
+                    .unwrap()
+                    .display()
+                    .to_string()
+            ),
+            "{error}"
+        );
+        assert!(error.contains(&format!("第 {line} 行")), "{error}");
+        assert!(!error.contains("PRIVATE_CANARY"));
+        assert_eq!(fs::read(&f.rollout).unwrap(), damaged);
+        assert_eq!(
+            fs::read(f.request.home.join("config.toml")).unwrap(),
+            config
+        );
+        assert_eq!(
+            fs::read(f.request.home.join("state_5.sqlite")).unwrap(),
+            database
+        );
+        assert!(!f.request.store_root.exists());
+    }
+}
+
+#[test]
+fn successful_switch_preserves_encrypted_before_images_across_next_switch() {
+    let mut f = Fixture::new();
+    let original = fs::read(&f.rollout).unwrap();
+    f.select("a", "api-a-model");
+    f.run().unwrap();
+    let operations = journal::list(&f.request.store_root.join("operations"), false).unwrap();
+    assert_eq!(
+        operations.len(),
+        1,
+        "successful switch removed its audit and backups"
+    );
+    let dir = f
+        .request
+        .store_root
+        .join("operations")
+        .join(&operations[0].id);
+    let manifest: journal::Manifest =
+        serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+    let image = manifest
+        .files
+        .iter()
+        .find(|c| c.path == f.rollout)
+        .unwrap()
+        .backup
+        .as_ref()
+        .unwrap();
+    let mut recovered = Vec::new();
+    easy_switch_core::crypto::decrypt_file(image, &mut recovered).unwrap();
+    assert_eq!(recovered, original);
+    f.select("b", "api-b-model");
+    f.run().unwrap();
+    assert!(image.exists());
+    assert_eq!(
+        journal::list(&f.request.store_root.join("operations"), false)
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[test]
 fn official_api_a_api_b_official_keeps_login_and_history() {
     let mut f = Fixture::new();
     let auth = fs::read(f.request.home.join("auth.json")).unwrap();

@@ -17,16 +17,40 @@ pub struct Header {
     pub base: Option<String>,
     pub base_offset: Option<u64>,
 }
+pub(crate) fn parse_record(raw: &[u8], path: &Path, line: u64) -> Result<Value> {
+    let text = std::str::from_utf8(raw).map_err(|e| {
+        anyhow::anyhow!(
+            "聊天记录 UTF-8 编码无效：{}，第 {line} 行，第 {} 字节；已停止处理",
+            path.display(),
+            e.valid_up_to() + 1
+        )
+    })?;
+    let text = text
+        .trim_start_matches('\u{feff}')
+        .trim_end_matches(['\r', '\n']);
+    serde_json::from_str(text).map_err(|e| {
+        let reason = match e.classify() {
+            serde_json::error::Category::Eof => "记录不完整",
+            serde_json::error::Category::Syntax => "语法错误",
+            _ => "数据格式错误",
+        };
+        anyhow::anyhow!(
+            "聊天记录 JSON 无效：{}，第 {line} 行，第 {} 列（{reason}）；已停止处理",
+            path.display(),
+            e.column()
+        )
+    })
+}
 pub fn header(path: &Path) -> Result<Header> {
     sessions::no_links(path)?;
     let mut input = BufReader::new(File::open(path)?).take(32 * 1024 * 1024 + 1);
-    for _ in 0..40 {
-        let mut line = String::new();
-        if input.read_line(&mut line)? == 0 {
+    for ordinal in 0..40 {
+        let mut line = Vec::new();
+        if input.read_until(b'\n', &mut line)? == 0 {
             break;
         }
         ensure!(line.len() <= 32 * 1024 * 1024, "会话元数据过大");
-        let v: Value = serde_json::from_str(line.trim_start_matches('\u{feff}'))?;
+        let v = parse_record(&line, path, ordinal + 1)?;
         if v["type"] == "session_meta" {
             let p = &v["payload"];
             return Ok(Header {
@@ -41,10 +65,12 @@ pub fn header(path: &Path) -> Result<Header> {
     anyhow::bail!("缺少 session_meta")
 }
 pub fn lines(path: &Path) -> Result<impl Iterator<Item = std::io::Result<String>>> {
-    Ok(segment_readers(path)?.into_iter().flat_map(|r| r.lines()))
+    Ok(segment_readers(path)?
+        .into_iter()
+        .flat_map(|(_, r)| r.lines()))
 }
 
-fn segment_readers(path: &Path) -> Result<Vec<BufReader<std::io::Take<File>>>> {
+fn segment_readers(path: &Path) -> Result<Vec<(PathBuf, BufReader<std::io::Take<File>>)>> {
     let first = header(path)?;
     let mut paths = std::collections::HashMap::new();
     if first.base.is_some() {
@@ -104,7 +130,7 @@ fn segment_readers(path: &Path) -> Result<Vec<BufReader<std::io::Take<File>>>> {
     segments.reverse();
     segments
         .into_iter()
-        .map(|(p, n)| Ok(BufReader::new(File::open(p)?.take(n))))
+        .map(|(p, n)| Ok((p.clone(), BufReader::new(File::open(p)?.take(n)))))
         .collect::<Result<Vec<_>>>()
 }
 
@@ -225,8 +251,9 @@ pub(crate) fn prepare_model_events(
         let mut model_history = false;
         let mut last_ordinal = None;
         let mut current_metadata = None;
-        for (segment, mut reader) in readers.into_iter().enumerate() {
+        for (segment, (path, mut reader)) in readers.into_iter().enumerate() {
             let mut line = vec![];
+            let mut physical_line = 0;
             loop {
                 ensure!(!ct.is_cancelled(), "操作已取消");
                 line.clear();
@@ -238,13 +265,11 @@ pub(crate) fn prepare_model_events(
                     break;
                 }
                 ensure!(length <= 32 * 1024 * 1024, "单条会话事件超过 32 MiB");
-                let text = std::str::from_utf8(&line)?
-                    .trim_start_matches('\u{feff}')
-                    .trim();
-                if text.is_empty() {
+                physical_line += 1;
+                if line.iter().all(u8::is_ascii_whitespace) {
                     continue;
                 }
-                let row: Value = serde_json::from_str(text)?;
+                let row = parse_record(&line, &path, physical_line)?;
                 if segment == current_segment {
                     last_ordinal = row["ordinal"].as_u64();
                     if current_metadata.is_none() && row["type"] == "session_meta" {
@@ -413,7 +438,7 @@ impl MetadataLine {
     fn read(path: PathBuf) -> Result<Self> {
         let mut input = BufReader::new(File::open(&path)?);
         let mut start = 0;
-        for _ in 0..40 {
+        for ordinal in 0..40 {
             let mut raw = vec![];
             let len = input
                 .by_ref()
@@ -439,7 +464,7 @@ impl MetadataLine {
                 start += len as u64;
                 continue;
             }
-            let node: Value = serde_json::from_slice(&raw[json_start..json_end])?;
+            let node = parse_record(&raw, &path, ordinal + 1)?;
             if node["type"] == "session_meta" {
                 return Ok(Self {
                     path,
@@ -691,6 +716,7 @@ pub(crate) fn stage_metadata_with_events(
                 BufWriter::with_capacity(64 * 1024, crate::store::private_file(&temp, true)?);
             let mut offset = 0;
             let mut ordinal = 0;
+            let mut physical_line = 0;
             let mut found = false;
             let mut line = vec![];
             let mut boundaries = vec![0];
@@ -704,6 +730,7 @@ pub(crate) fn stage_metadata_with_events(
                 if len == 0 {
                     break;
                 }
+                physical_line += 1;
                 ensure!(len <= 32 * 1024 * 1024, "单条会话事件超过 32 MiB");
                 if shift.delta > 0 && line.last() == Some(&b'\n') {
                     boundaries.push(offset + len as u64);
@@ -713,8 +740,7 @@ pub(crate) fn stage_metadata_with_events(
                     offset += len as u64;
                     continue;
                 }
-                let text = std::str::from_utf8(&line)?.trim_start_matches('\u{feff}');
-                let row: Value = serde_json::from_str(text)?;
+                let row = parse_record(&line, &m.path, physical_line)?;
                 if row["type"] == "session_meta" {
                     if !found {
                         ensure!(
@@ -747,15 +773,7 @@ pub(crate) fn stage_metadata_with_events(
                 crate::journal::hash(&m.path)? == before,
                 "会话文件出现并发修改"
             );
-            journal.stage_file(&m.path, &temp)?;
-            ensure!(
-                journal
-                    .manifest
-                    .files
-                    .last()
-                    .is_some_and(|c| c.path == m.path && c.before_hash == before),
-                "备份期间会话文件出现并发修改"
-            );
+            journal.stage_file_from_snapshot(&m.path, &temp, &before)?;
             // Reuse the validated source boundaries; commit still checks its full hash.
             if shift.delta > 0 {
                 shift.source_boundaries = Some((offset, boundaries));
