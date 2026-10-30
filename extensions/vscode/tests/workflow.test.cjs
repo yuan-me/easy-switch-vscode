@@ -30,13 +30,14 @@ async function host(options, check) {
     StatusBarAlignment: { Left: 1 }, ProgressLocation: { Notification: 15 }, ExtensionKind: { Workspace: 2 },
     env: { remoteName: 'ssh-remote' },
     extensions: { getExtension: () => codex },
-    workspace: { workspaceFolders: [{ uri: { fsPath: '/project' } }], getConfiguration: () => ({ get: () => undefined }) },
+    workspace: { openTextDocument: async value => value, workspaceFolders: [{ uri: { fsPath: '/project' } }], getConfiguration: () => ({ get: () => undefined }) },
     commands: {
       registerCommand: (name, callback) => { commands.set(name, callback); return new Disposable(); },
-      executeCommand: async name => { if (name === 'chatgpt.openSidebar') events.push('openCodex'); if (name === 'workbench.action.reloadWindow') { events.push('reload'); if (options.reloadFails) throw Error('reload unavailable'); } }
+      executeCommand: async (name, ...args) => { if (name === 'setContext') events.push({ context: args }); if (name === 'chatgpt.openSidebar') events.push('openCodex'); if (name === 'workbench.action.reloadWindow') { events.push('reload'); if (options.reloadFails) throw Error('reload unavailable'); } }
     },
     window: {
       createStatusBarItem: () => ({ show() {}, dispose() {} }),
+      showTextDocument: async document => { events.push({ document }); },
       registerTreeDataProvider: (_, provider) => { view = provider; return new Disposable(); },
       showWarningMessage: async (message, options) => { messages.push(message); if (options?.detail) events.push({ detail: options.detail }); return undefined; },
       showErrorMessage: async (message, ...actions) => { messages.push(message); events.push({ errorActions: actions }); },
@@ -53,7 +54,7 @@ async function host(options, check) {
   const manual = require('../out/manualStop'), savedConfirm = manual.confirmManualStop;
   manual.confirmManualStop = async (title, detail) => { events.push('confirm'); events.push({ detail }); return title.startsWith('修复聊天') ? !!options.acceptRepair : !options.cancelConfirmation; };
   helper.runHelper = async (_, request) => {
-    if (request.action === 'inspect') { inspections++; events.push({ inspect: structuredClone(request) }); return snapshot(); }
+    if (request.action === 'inspect') { inspections++; events.push({ inspect: structuredClone(request) }); if (options.inspectFails || (options.failAfterFirstInspection && inspections > 1)) throw Error('会话扫描存在异常：synthetic.jsonl：会话元数据重复且无法确认继承关系'); return snapshot(); }
     events.push({ mutation: structuredClone(request) });
     if (options.mutationFails) { phase = 'pending'; throw Error('模拟部分提交'); }
     phase = 'ready';
@@ -66,7 +67,7 @@ async function host(options, check) {
     const { activate } = require('../out/extension');
     const context = { extension: { extensionKind: 2 }, extensionPath: '/extension', globalStorageUri: { fsPath: '/plugin-storage' }, globalState: state, secrets: secretStorage, subscriptions: [] };
     await activate(context);
-    await check({ commands, events, messages, inputs, view, workspace: vscode.workspace, get activated() { return activated; } });
+    await check({ options, commands, events, messages, inputs, view, workspace: vscode.workspace, get activated() { return activated; } });
   } finally {
     manual.confirmManualStop = savedConfirm; Module._load = saved.load; fs.access = saved.access; helper.runHelper = saved.run; environment.discoverTarget = saved.discover;
     Object.defineProperty(process, 'platform', saved.platform);
@@ -87,7 +88,41 @@ test('target validation precedes manual confirmation and displays inspected dire
   assert.ok(!events.includes('modelInput'));
   assert.equal(mutation.sqliteHome, undefined);
   assert.deepEqual(mutation.projectDirs, ['/project']);
-  assert.equal(events.at(-1), 'reload');
+  assert.equal(events.filter(e => typeof e === 'string').at(-1), 'reload');
+}));
+
+test('startup scan error keeps providers, target, actions and full diagnostics visible', () => host({ inspectFails: true }, async ({ options, commands, events, view, inputs }) => {
+  const rows = view.getChildren();
+  assert.ok(rows.some(row => row.provider?.id === provider.id));
+  assert.ok(rows.some(row => row.provider?.id === 'official'));
+  assert.ok(rows.some(row => row.label === home));
+  for (const command of ['showError', 'refresh', 'addProvider', 'repairHistories', 'recover']) {
+    assert.ok(rows.some(row => row.command?.command === `easySwitch.${command}`), command);
+  }
+  assert.ok(!rows.some(row => row.description === '当前配置'));
+  assert.ok(events.some(e => e.context?.[0] === 'easySwitch.busy' && e.context[1] === false));
+  await commands.get('easySwitch.showError')();
+  assert.match(events.find(e => e.document).document.content, /元数据重复/);
+  await commands.get('easySwitch.editProvider')({ provider });
+  assert.equal(inputs.at(-1).value, provider.name);
+  options.modelInput = 'known-official-model';
+  await commands.get('easySwitch.switchProvider')({ provider });
+  await commands.get('easySwitch.removeProvider')({ provider });
+  await commands.get('easySwitch.reload')();
+  assert.ok(!events.some(e => e.mutation)); assert.ok(!events.includes('reload'));
+  options.inspectFails = false; await commands.get('easySwitch.refresh')();
+  assert.ok(!view.getChildren().some(row => row.command?.command === 'easySwitch.showError'));
+  assert.ok(view.getChildren().some(row => row.description === '当前配置'));
+}));
+
+test('failed refresh clears stale active status but keeps current server providers; unresolved target clears them', () => host({ failAfterFirstInspection: true }, async ({ commands, view }) => {
+  await commands.get('easySwitch.refresh')();
+  assert.ok(view.getChildren().some(row => row.provider?.id === provider.id));
+  assert.ok(!view.getChildren().some(row => row.description === '当前配置'));
+  environment.discoverTarget = async () => { throw Error('target unavailable'); };
+  await commands.get('easySwitch.refresh')();
+  assert.ok(!view.getChildren().some(row => row.provider));
+  assert.ok(view.getChildren().some(row => row.command?.command === 'easySwitch.refresh'));
 }));
 
 test('repair preview can be cancelled without stopping or mutating histories', () => host({ repairPlan }, async ({ commands, events, view }) => {
@@ -108,7 +143,7 @@ test('confirmed recovery runs without process management and reloads', () => hos
   await commands.get('easySwitch.recover')();
   const mutation = events.findIndex(e => e.mutation?.action === 'recover');
   assert.ok(mutation > events.indexOf('confirm'));
-  assert.equal(events.at(-1), 'reload');
+  assert.equal(events.filter(e => typeof e === 'string').at(-1), 'reload');
 }));
 
 test('confirmed repair binds the preview, sends no provider secret and reloads before switching', () => host({ repairPlan, acceptRepair: true }, async ({ commands, events }) => {
@@ -122,7 +157,7 @@ test('confirmed repair binds the preview, sends no provider secret and reloads b
   assert.equal(mutations[0].provider, undefined);
   assert.ok(mutations[0].journalKey);
   assert.ok(events.indexOf('confirm') < events.findIndex(e => e.mutation));
-  assert.equal(events.at(-1), 'reload');
+  assert.equal(events.filter(e => typeof e === 'string').at(-1), 'reload');
 }));
 
 test('repair failure blocks reload until the interrupted operation is recovered', () => host({ repairPlan, acceptRepair: true, mutationFails: true }, async ({ commands, events }) => {
