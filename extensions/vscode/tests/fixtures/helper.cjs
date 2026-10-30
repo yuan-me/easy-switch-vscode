@@ -9,9 +9,9 @@ process.stdin.on('data', value => {
   const request = JSON.parse(input);
   if (request.operationId === 'malformed') {
     process.stdout.write('{"type":"result","activeProviderId":null}\n');
-  } else if (request.operationId === 'skip-report' || request.operationId === 'bad-report') {
-    const skippedHistories = request.operationId === 'bad-report' ? [null] : Array.from({ length: 500 }, (_, i) => ({ path: `/synthetic/sessions/${i}-${request.apiKey}.jsonl`, reason: `损坏记录，保留原样 ${request.journalKey} ${'x'.repeat(150)}` }));
-    process.stdout.write(JSON.stringify({ type: 'result', protocolVersion: 1, activeProviderId: null, skippedHistories }) + '\n');
+  } else if (request.operationId === 'repair-report' || request.operationId === 'bad-report') {
+    const items = request.operationId === 'bad-report' ? [null] : Array.from({ length: 500 }, (_, i) => ({ path: `/synthetic/sessions/${i}-${request.apiKey}.jsonl`, line: i+1, missingImage: false, detail: `修复说明 ${request.journalKey} ${'x'.repeat(150)}` }));
+    process.stdout.write(JSON.stringify({ type: 'result', protocolVersion: 1, activeProviderId: null, repairPlan: { fingerprint: 'a'.repeat(64), fileCount: 500, items } }) + '\n');
   } else if (request.action === 'switch') {
     process.stdout.write(JSON.stringify({ type: 'error', message: `failed ${request.apiKey} ${request.journalKey}` }) + '\n');
   } else {

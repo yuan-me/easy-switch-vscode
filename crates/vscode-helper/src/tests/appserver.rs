@@ -339,6 +339,7 @@ fn real_appserver_search_keeps_appended_model_projection() -> Result<()> {
         journal_key: None,
         operation_id: None,
         expected_config_fingerprint: None,
+        repair_fingerprint: None,
         project_dirs: vec![root.join("project")],
     };
     for (id, model, expected_provider) in [

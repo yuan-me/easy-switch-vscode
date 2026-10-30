@@ -3,12 +3,14 @@ import * as readline from 'node:readline';
 import type { Provider } from './storage';
 import type { Target } from './environment';
 export interface Operation { id: string; state: string; description: string; fileCount: number }
-export interface HelperResult { protocolVersion: 1; activeProviderId: string | null; operations?: Operation[]; sessionCount?: number | null; skippedHistories?: { path: string; reason: string }[]; configFingerprint?: string | null; committed?: boolean; home?: string; sqliteHome?: string | null; officialModel?: string | null }
+export interface RepairPlan { fingerprint: string; fileCount: number; items: { path: string; line: number; detail: string; missingImage: boolean }[] }
+export interface HelperResult { protocolVersion: 1; activeProviderId: string | null; operations?: Operation[]; sessionCount?: number | null; repairPlan?: RepairPlan; repairedFileCount?: number; configFingerprint?: string | null; committed?: boolean; home?: string; sqliteHome?: string | null; officialModel?: string | null }
 export interface Progress { type: 'progress'; stage: string; detail: string; completed?: number; total?: number }
 export interface HelperRequest extends Target {
-  protocolVersion: 1; action: 'inspect' | 'switch' | 'recover'; storeRoot: string;
+  protocolVersion: 1; action: 'inspect' | 'switch' | 'recover' | 'repair'; storeRoot: string;
   provider?: Provider | { id: 'official' }; apiKey?: string; journalKey?: string;
   operationId?: string; expectedConfigFingerprint?: string; projectDirs?: string[]; officialModel?: string;
+  repairFingerprint?: string;
 }
 export function runHelper(binary: string, request: HelperRequest, onProgress: (value: Progress) => void = () => {}): Promise<HelperResult> {
   return new Promise((resolve, reject) => {
@@ -40,9 +42,10 @@ export function runHelper(binary: string, request: HelperRequest, onProgress: (v
         else if (event.type === 'error' && typeof event.message === 'string') failure = safe(event.message);
         else if (event.type === 'result' && event.protocolVersion === 1 && (event.activeProviderId === null || typeof event.activeProviderId === 'string')) {
           if (result) throw new Error();
-          if (event.skippedHistories !== undefined) {
-            if (!Array.isArray(event.skippedHistories) || event.skippedHistories.some(item => !item || typeof item.path !== 'string' || typeof item.reason !== 'string')) throw new Error();
-            event.skippedHistories = event.skippedHistories.map(item => ({ path: safe(item.path), reason: safe(item.reason) }));
+          if (event.repairPlan !== undefined) {
+            const p = event.repairPlan as RepairPlan;
+            if (!p || typeof p.fingerprint !== 'string' || !/^[a-fA-F0-9]{64}$/.test(p.fingerprint) || !Number.isSafeInteger(p.fileCount) || p.fileCount < 1 || !Array.isArray(p.items) || !p.items.length || p.items.some(i => !i || typeof i.path !== 'string' || typeof i.detail !== 'string' || !Number.isSafeInteger(i.line) || i.line < 1 || typeof i.missingImage !== 'boolean')) throw new Error();
+            event.repairPlan = { ...p, items: p.items.map(i => ({ ...i, path: safe(i.path), detail: safe(i.detail) })) };
           }
           result = event as unknown as HelperResult;
         } else throw new Error();

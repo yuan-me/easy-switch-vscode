@@ -10,15 +10,18 @@ const { ProviderStore } = require('../out/storage');
 const provider = { id: 'esv_' + 'a'.repeat(32), name: '服务商 A', baseUrl: 'https://example.com/v1', model: 'model-a' };
 const home = '/home/test/.codex';
 const pending = [{ id: 'operation-one', description: '中断切换', state: 'Applying', fileCount: 3 }];
+const repairPlan = { fingerprint: 'a'.repeat(64), fileCount: 1, items: [{ path: '/synthetic/rollout.jsonl', line: 4, detail: '图片无法恢复，保留原件备份', missingImage: true }] };
 
 async function host(options, check) {
+  const optionsHost = options;
   const values = new Map(), secrets = new Map(), commands = new Map(), events = [], messages = [], inputs = [];
   const state = { get: key => values.get(key), update: async (key, value) => { values.set(key, structuredClone(value)); } };
   const secretStorage = { get: async key => secrets.get(key), store: async (key, value) => { secrets.set(key, value); }, delete: async key => { secrets.delete(key); } };
   const store = await ProviderStore.open(state, secretStorage, home);
   await store.save(provider, 'test-key');
+  let repaired = false;
   let view, phase = options.pending ? 'pending' : 'ready', activated = 0, inspections = 0;
-  const snapshot = () => ({ type: 'result', protocolVersion: 1, home, sqliteHome: options.removeSqliteConfig && inspections > 1 ? options.envSqlite ?? null : '/data/sqlite', activeProviderId: 'official', officialModel: options.officialModel === undefined ? 'official-model' : options.officialModel, configFingerprint: phase === 'pending' ? null : 'fingerprint', sessionCount: phase === 'pending' ? null : 2, operations: phase === 'pending' ? pending : [], skippedHistories: options.skippedHistories ?? [] });
+  const snapshot = () => ({ type: 'result', protocolVersion: 1, home, sqliteHome: options.removeSqliteConfig && inspections > 1 ? options.envSqlite ?? null : '/data/sqlite', activeProviderId: 'official', officialModel: options.officialModel === undefined ? 'official-model' : options.officialModel, configFingerprint: phase === 'pending' ? null : 'fingerprint', sessionCount: phase === 'pending' ? null : 2, operations: phase === 'pending' ? pending : [], repairPlan: repaired ? undefined : options.repairPlan });
   const codex = { extensionKind: 2, extensionPath: '/extensions/openai.chatgpt', packageJSON: { version: options.version ?? '26.1021.22027' }, activate: async () => { activated++; } };
   class Disposable { dispose() {} }
   const vscode = {
@@ -36,7 +39,7 @@ async function host(options, check) {
     window: {
       createStatusBarItem: () => ({ show() {}, dispose() {} }),
       registerTreeDataProvider: (_, provider) => { view = provider; return new Disposable(); },
-      showWarningMessage: async (message, options) => { messages.push(message); if (options?.detail) events.push({ detail: options.detail }); return message.startsWith('切换到') ? '切换并重载' : undefined; },
+      showWarningMessage: async (message, options) => { messages.push(message); if (options?.detail) events.push({ detail: options.detail }); return message.startsWith('切换到') ? '切换并重载' : message.startsWith('修复聊天') && optionsHost.acceptRepair ? '备份、修复并重载' : undefined; },
       showErrorMessage: async (message, ...actions) => { messages.push(message); events.push({ errorActions: actions }); },
       showInformationMessage: async message => { messages.push(message); },
       showQuickPick: async items => items.find(item => item.provider?.id === provider.id),
@@ -54,7 +57,8 @@ async function host(options, check) {
     events.push({ mutation: structuredClone(request) });
     if (options.mutationFails) { phase = 'pending'; throw Error('模拟部分提交'); }
     phase = 'ready';
-    return { type: 'result', protocolVersion: 1, committed: true, activeProviderId: provider.id, skippedHistories: options.skippedHistories ?? [] };
+    if (request.action === 'repair') repaired = true;
+    return { type: 'result', protocolVersion: 1, committed: true, activeProviderId: provider.id, repairPlan: repaired ? undefined : options.repairPlan };
   };
   Object.defineProperty(process, 'platform', { value: 'linux' });
   try {
@@ -86,21 +90,35 @@ test('target validation precedes backend stop and displays inspected directory w
   assert.equal(events.at(-1), 'reload');
 }));
 
-test('skipped histories stay visible before and after switch and are disclosed in confirmation', () => host({ skippedHistories: [{ path: home + '/sessions/bad.jsonl', reason: '第 35 行 JSON 无效' }] }, async ({ commands, events, view }) => {
-  const check = () => {
-    const row = view.getChildren().find(row => String(row.label).includes('保留原样：1'));
-    assert.equal(row.collapsibleState, 1);
-    const child = view.getChildren(row)[0];
-    assert.equal(child.label, 'bad.jsonl');
-    assert.ok(child.tooltip.includes('第 35 行'));
-    assert.ok(child.tooltip.includes(home + '/sessions/bad.jsonl'));
-  };
-  check();
+test('repair preview can be cancelled without stopping or mutating histories', () => host({ repairPlan }, async ({ commands, events, view }) => {
+  assert.ok(view.getChildren().some(row => row.command?.command === 'easySwitch.repairHistories'));
   await commands.get('easySwitch.switchProvider')({ provider });
-  check();
-  assert.ok(events.find(e => e.detail)?.detail.includes('保留原样：1 个历史文件'));
+  assert.ok(events.some(e => e.detail?.includes('这不是无损修复')));
+  assert.ok(!events.includes('stop'));
+  assert.ok(!events.some(e => e.mutation || e.inspect?.apiKey));
+}));
+
+test('confirmed repair binds the preview, sends no provider secret and reloads before switching', () => host({ repairPlan, acceptRepair: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.repairHistories')();
+  const mutations = events.filter(e => e.mutation).map(e => e.mutation);
+  assert.equal(mutations.length, 1);
+  assert.equal(mutations[0].action, 'repair');
+  assert.equal(mutations[0].repairFingerprint, repairPlan.fingerprint);
+  assert.equal(mutations[0].expectedConfigFingerprint, 'fingerprint');
+  assert.equal(mutations[0].apiKey, undefined);
+  assert.equal(mutations[0].provider, undefined);
+  assert.ok(mutations[0].journalKey);
+  assert.ok(events.indexOf('stop') < events.findIndex(e => e.mutation));
   assert.equal(events.at(-1), 'reload');
 }));
+
+test('repair failure blocks reload until the interrupted operation is recovered', () => host({ repairPlan, acceptRepair: true, mutationFails: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.repairHistories')();
+  await commands.get('easySwitch.reload')();
+  assert.ok(events.some(e => e.mutation?.action === 'repair'));
+  assert.ok(!events.includes('reload'));
+}));
+
 test('unknown official model can be cancelled before preflight or backend stop', () => host({ officialModel: null }, async ({ commands, events, inputs }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.equal(inputs.length, 1);
@@ -195,6 +213,6 @@ test('unknown official version is rejected before stopping backend', () => host(
 }));
 test('reload failure reports committed configuration and does not run another mutation', () => host({ reloadFails: true }, async ({ commands, events, messages }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
-  assert.ok(messages.some(message => message.includes('配置已保存，但窗口未能重载')));
+  assert.ok(messages.some(message => message.includes('操作已完成，但窗口未能重载')));
   assert.equal(events.filter(e => e.mutation).length, 1);
 }));

@@ -52,21 +52,23 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     rows[0]!.iconPath = new vscode.ThemeIcon('remote');
     rows[1]!.iconPath = new vscode.ThemeIcon('folder');
     rows[1]!.tooltip = `Codex 数据目录：${this.ready.target.home}\n数据库：${this.ready.target.sqliteHome ?? `${this.ready.target.home}/sqlite`}\n使用此目录的其他 Codex 窗口和 CLI 也会使用这份配置。`;
-    if (this.result.skippedHistories?.length) {
-      const children = this.result.skippedHistories.map(item => {
-        const row = new Row(path.basename(item.path));
-        row.description = '保留原样';
-        row.tooltip = `${item.path}\n${item.reason}\n此文件及对应线程记录不参与迁移，可能暂时无法继续聊天。`;
+    if (this.result.repairPlan) {
+      const children = this.result.repairPlan.items.map(item => {
+        const row = new Row(`${path.basename(item.path)} · 第 ${item.line} 行`);
+        row.description = item.missingImage ? '图片无法恢复' : '有可核实的修复方案';
+        row.tooltip = `${item.path}\n${item.detail}`;
         return row;
       });
-      const skipped = new Row(`保留原样：${children.length} 个历史文件`, undefined, children);
-      skipped.iconPath = new vscode.ThemeIcon('warning');
-      skipped.tooltip = '展开查看损坏文件及需要一并保留的关联历史。它们不会被删除或覆盖，对应线程记录也不会迁移。';
-      rows.push(skipped);
+      const plan = new Row(`待修复：${this.result.repairPlan.fileCount} 个聊天文件，${children.length} 处异常`, undefined, children);
+      plan.iconPath = new vscode.ThemeIcon('warning');
+      rows.push(plan);
+      const action = new Row('预览并修复聊天记录');
+      action.command = { command: 'easySwitch.repairHistories', title: '修复聊天记录' };
+      action.iconPath = new vscode.ThemeIcon('tools'); rows.push(action);
     }
     if (this.progress) { const p = new Row(this.progress); p.iconPath = new vscode.ThemeIcon('loading~spin'); rows.push(p); }
     if ((this.reloadPending || this.stopped) && !this.operationUncertain && !this.result.operations?.some(unfinished)) {
-      const reload = new Row(this.reloadPending ? '配置已保存，点击重载窗口' : 'Codex 已停止，点击重载窗口');
+      const reload = new Row(this.reloadPending ? '操作已完成，点击重载窗口' : 'Codex 已停止，点击重载窗口');
       reload.iconPath = new vscode.ThemeIcon('refresh');
       reload.command = { command: 'easySwitch.reload', title: '重载窗口' };
       rows.push(reload);
@@ -211,6 +213,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     return path.join(ready.codex.extensionPath, 'bin', process.arch === 'arm64' ? 'linux-aarch64' : 'linux-x86_64', 'codex');
   }
   async switch(row?: Row): Promise<void> {
+    if (this.result?.repairPlan) { await this.repairHistories(); return; }
     const provider = await this.choose(row);
     if (!provider) return;
     const ready = this.requireReady();
@@ -226,13 +229,13 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     const before = await runHelper(ready.binary, { ...this.request(ready, 'inspect'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, officialModel });
     this.adoptTarget(ready, before);
     this.result = before;
+    if (before.repairPlan) { this.update(); await this.repairHistories(); return; }
     if (before.operations?.some(unfinished)) throw new Error('存在未完成的切换，请先运行“恢复中断的切换”。');
     const configFingerprint = before.configFingerprint;
     if (!configFingerprint) throw new Error('切换工具没有返回配置指纹，无法安全提交。');
     officialModel = before.officialModel ?? officialModel;
     this.update();
-    const skipped = before.skippedHistories?.length ?? 0;
-    const accepted = await vscode.window.showWarningMessage(`切换到“${provider.name}”并重载 VS Code？`, { modal: true, detail: `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n可迁移聊天：${before.sessionCount ?? '未知'} 个\n保留原样：${skipped} 个历史文件${skipped ? '（损坏或关联历史，详情见侧边栏）' : ''}\n\n请先结束正在生成的任务。切换会停止当前窗口的 Codex、迁移完整聊天并更新共享配置。被跳过的聊天及对应线程记录保持原样，可能暂时无法使用。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。` }, '切换并重载');
+    const accepted = await vscode.window.showWarningMessage(`切换到“${provider.name}”并重载 VS Code？`, { modal: true, detail: `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n请先结束正在生成的任务。切换会停止当前窗口的 Codex、迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。` }, '切换并重载');
     if (!accepted) return;
     const journalKey = await ready.store.journalKey();
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Easy Switch', cancellable: false }, async progress => {
@@ -272,6 +275,32 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     this.result = result; this.operationUncertain = false; this.reloadPending = true; this.update();
     await this.reload();
   }
+  async repairHistories(): Promise<void> {
+    const ready = this.requireReady();
+    const executable = this.supported(ready);
+    const snapshot = await runHelper(ready.binary, this.request(ready, 'inspect'));
+    this.adoptTarget(ready, snapshot); this.result = snapshot; this.update();
+    if (snapshot.operations?.some(unfinished)) throw new Error('先恢复中断操作，再修复聊天记录。');
+    const plan = snapshot.repairPlan;
+    if (!plan) { void vscode.window.showInformationMessage('没有发现需要修复的记录。'); return; }
+    if (!snapshot.configFingerprint) throw new Error('缺少配置指纹，不能修复。');
+    const missing = plan.items.filter(i => i.missingImage).length;
+    const accepted = await vscode.window.showWarningMessage('修复聊天记录并重载窗口？', { modal: true, detail:
+      `服务器：${os.hostname()}\n目录：${ready.target.home}\n涉及 ${plan.fileCount} 个聊天文件、${plan.items.length} 处异常，逐项说明见侧边栏。\n\n完整记录保留原字节。截断残片保存在加密原件备份中；修复副本使用可核实的完整记录，不猜补未知内容。${missing ? `\n有 ${missing} 处图片及尾部内容无法恢复：将保留工具调用 ID 和文字，用明确修复说明替代损坏图片。这不是无损修复。` : ''}\n\n请先结束生成任务。操作会停止 Codex、加密保留原件，再用修复副本替换活动聊天文件；校验失败则回滚。修复不更换服务商，重载后再点击目标服务商切换。` }, '备份、修复并重载');
+    if (accepted !== '备份、修复并重载') return;
+    const journalKey = await ready.store.journalKey();
+    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Easy Switch · 修复聊天', cancellable: false }, async progress => {
+      this.stopped = await stopBackend(ready.target.home, executable, process.pid, ready.target.sqliteHome) || this.stopped;
+      this.operationUncertain = true;
+      const result = await runHelper(ready.binary, { ...this.request(ready, 'repair'), journalKey,
+        expectedConfigFingerprint: snapshot.configFingerprint!, repairFingerprint: plan.fingerprint }, event => {
+        this.progress = `${event.stage}：${event.detail}`; this.update(); progress.report({ message: this.progress });
+      });
+      if (!result.committed) throw new Error('修复结果尚未确认，请刷新并检查中断操作。');
+      this.result = result; this.operationUncertain = false; this.reloadPending = true; this.update();
+    });
+    await this.reload();
+  }
   private ensureStable(): void {
     this.requireReady();
     if (this.operationUncertain || this.result?.operations?.some(unfinished)) throw new Error('切换尚未完成。请先刷新并恢复中断操作，再重载 Codex，以免写入尚未迁移完的聊天。');
@@ -283,7 +312,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   async reload(): Promise<void> {
     this.ensureStable();
     try { await vscode.commands.executeCommand('workbench.action.reloadWindow'); }
-    catch { throw new Error(this.reloadPending ? '配置已保存，但窗口未能重载。请运行“开发人员: 重新加载窗口”。' : '窗口重载失败，请手动重新加载窗口。'); }
+    catch { throw new Error(this.reloadPending ? '操作已完成，但窗口未能重载。请运行“开发人员: 重新加载窗口”。' : '窗口重载失败，请手动重新加载窗口。'); }
   }
 }
 
@@ -294,7 +323,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const commands: Record<string, (row?: Row) => Promise<void>> = {
     addProvider: () => view.edit(undefined, true), editProvider: row => view.edit(row), removeProvider: row => view.remove(row),
     switchProvider: row => view.switch(row), refresh: () => view.refresh(), recover: () => view.recover(), reload: () => view.reload(),
-    openCodex: () => view.openCodex()
+    openCodex: () => view.openCodex(), repairHistories: () => view.repairHistories()
   };
   for (const [name, callback] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`easySwitch.${name}`, (row?: Row) => view.command(() => callback(row))));
   // Refresh errors belong in the sidebar; do not interrupt every unrelated VS Code startup.

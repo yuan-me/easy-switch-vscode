@@ -429,7 +429,10 @@ pub fn ensure_unreferenced(settings: &Settings, deleting: &[PathBuf]) -> Result<
         .iter()
         .map(|p| sessions::normalize(p))
         .collect::<Result<Vec<_>>>()?;
-    let ids: HashSet<_> = deleting.iter().filter_map(|p| rollout_id(p)).collect();
+    let mut ids: HashSet<_> = deleting.iter().filter_map(|p| rollout_id(p)).collect();
+    for path in &deleting {
+        ids.insert(header(path)?.id);
+    }
     for folder in ["sessions", "archived_sessions"] {
         let root = settings.codex_home.join(folder);
         if !root.exists() {
@@ -644,7 +647,6 @@ pub fn stage_metadata(
         key,
         value,
         &std::collections::HashMap::new(),
-        &HashSet::new(),
         ct,
         progress,
     )
@@ -657,7 +659,6 @@ pub(crate) fn stage_metadata_with_events(
     key: &str,
     value: &str,
     events: &std::collections::HashMap<PathBuf, Vec<u8>>,
-    excluded: &HashSet<PathBuf>,
     ct: &tokio_util::sync::CancellationToken,
     progress: &impl Fn(crate::Progress),
 ) -> Result<std::collections::HashMap<String, OffsetShift>> {
@@ -691,9 +692,6 @@ pub(crate) fn stage_metadata_with_events(
                 continue;
             }
             let path = sessions::owned(entry.path(), settings)?;
-            if excluded.contains(&path_key(&path)?) {
-                continue;
-            }
             let m = MetadataLine::read(path)?;
             scanned += 1;
             progress(crate::Progress::new(

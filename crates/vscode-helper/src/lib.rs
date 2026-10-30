@@ -36,6 +36,7 @@ pub struct Request {
     pub journal_key: Option<String>,
     pub operation_id: Option<String>,
     pub expected_config_fingerprint: Option<String>,
+    pub repair_fingerprint: Option<String>,
     #[serde(default)]
     pub project_dirs: Vec<PathBuf>,
 }
@@ -335,7 +336,10 @@ fn validate_paths(req: &Request) -> Result<()> {
         "扩展与切换工具协议版本不匹配"
     );
     ensure!(
-        matches!(req.action.as_str(), "inspect" | "switch" | "recover"),
+        matches!(
+            req.action.as_str(),
+            "inspect" | "switch" | "recover" | "repair"
+        ),
         "不支持的操作"
     );
     for path in [&req.home, &req.store_root]
@@ -610,6 +614,9 @@ pub fn execute(req: &Request, progress: &impl Fn(Progress)) -> Result<Value> {
         "recover" => recover(&req, &|| {
             guard::ensure_stopped(&req.home, req.sqlite_home.as_deref())
         }),
+        "repair" => repair(&req, progress, &|| {
+            guard::ensure_stopped(&req.home, req.sqlite_home.as_deref())
+        }),
         _ => unreachable!(),
     }
 }
@@ -636,13 +643,16 @@ fn inspect(req: &Request) -> Result<Value> {
         None
     };
     let ct = CancellationToken::new();
-    let selection = easy_switch_core::history_selection::Selection::read(&settings(req), &ct)?;
-    let scan = sessions::Scanner::default().scan_excluding(
-        &settings(req),
-        &ct,
-        &|_| {},
-        &selection.excluded,
-    )?;
+    let repair = easy_switch_core::history_repair::Plan::read(&settings(req), &ct)?;
+    if repair.summary.file_count > 0 {
+        return Ok(
+            json!({"protocolVersion":PROTOCOL_VERSION,"home":req.home,"sqliteHome":req.sqlite_home,
+            "activeProviderId":active_provider(&doc,&state),"operations":operations,"sessionCount":null,
+            "officialModel":official_model(&doc,&planned_state),"configFingerprint":journal::hash_bytes(text.as_bytes()),
+            "repairPlan":repair.summary}),
+        );
+    }
+    let scan = sessions::Scanner::default().scan(&settings(req), &ct)?;
     ensure!(
         scan.warnings.is_empty(),
         "会话扫描存在异常：{}",
@@ -666,7 +676,7 @@ fn inspect(req: &Request) -> Result<Value> {
     Ok(
         json!({"protocolVersion":PROTOCOL_VERSION,"home":req.home,"sqliteHome":req.sqlite_home,
         "activeProviderId":active_provider(&doc,&state),"operations":operations,
-        "sessionCount":scan.sessions.len(),"skippedHistories":selection.skipped,"officialModel":official_model(&doc,&planned_state),
+        "sessionCount":scan.sessions.len(),"officialModel":official_model(&doc,&planned_state),
         "configFingerprint":journal::hash_bytes(text.as_bytes())}),
     )
 }
@@ -700,19 +710,12 @@ fn switch(
             )
         })?;
     j.retain_backups()?;
-    progress(Progress::new(
-        "检查聊天",
-        "检查完整性与分页关联，损坏聊天保留原样",
-        0,
-        None,
-    ));
-    let selection = easy_switch_core::history_selection::Selection::read(&settings, &ct)?;
-    let scan = sessions::Scanner::default().scan_excluding(
-        &settings,
-        &ct,
-        progress,
-        &selection.excluded,
-    )?;
+    let repair = easy_switch_core::history_repair::Plan::read(&settings, &ct)?;
+    ensure!(
+        repair.summary.file_count == 0,
+        "发现可修复的聊天记录，请先运行“修复聊天记录”再切换；没有跳过聊天"
+    );
+    let scan = sessions::Scanner::default().scan_with_progress(&settings, &ct, progress)?;
     ensure!(
         scan.warnings.is_empty(),
         "会话扫描存在异常：{}",
@@ -732,7 +735,7 @@ fn switch(
         &req.home.join("config.toml"),
         Some(next.to_string().as_bytes()),
     )?;
-    sessions::stage_provider_with_model_excluding(
+    sessions::stage_provider_with_model(
         &mut j,
         &settings,
         &scan.sessions,
@@ -742,7 +745,6 @@ fn switch(
         next.get("model")
             .and_then(Item::as_str)
             .or(state.official_model.as_deref()),
-        &selection.excluded,
         &ct,
         progress,
     )?;
@@ -751,15 +753,8 @@ fn switch(
         Some(&serde_json::to_vec(&state)?),
     )?;
     let expected = next["model_provider"].as_str().unwrap();
-    selection.verify_preserved()?;
     j.commit_verified(progress, guard, &|| {
-        selection.verify_preserved()?;
-        let verified = sessions::Scanner::default().scan_excluding(
-            &settings,
-            &ct,
-            &|_| {},
-            &selection.excluded,
-        )?;
+        let verified = sessions::Scanner::default().scan(&settings, &ct)?;
         let identities = |items: &[sessions::Session]| {
             items
                 .iter()
@@ -781,7 +776,63 @@ fn switch(
         Ok(())
     })?;
     Ok(
-        json!({"protocolVersion":PROTOCOL_VERSION,"committed":true,"activeProviderId":state.active_provider_id,"sessionCount":scan.sessions.len(),"skippedHistories":selection.skipped}),
+        json!({"protocolVersion":PROTOCOL_VERSION,"committed":true,"activeProviderId":state.active_provider_id,"sessionCount":scan.sessions.len()}),
+    )
+}
+
+fn repair(
+    req: &Request,
+    progress: &impl Fn(Progress),
+    guard: &impl Fn() -> Result<()>,
+) -> Result<Value> {
+    check_owner(req)?;
+    guard()?;
+    let (text, doc) = read_config(&req.home)?;
+    ensure!(
+        req.expected_config_fingerprint.as_deref()
+            == Some(journal::hash_bytes(text.as_bytes()).as_str()),
+        "检查后配置发生变化，请刷新后重试"
+    );
+    let plan =
+        easy_switch_core::history_repair::Plan::read(&settings(req), &CancellationToken::new())?;
+    ensure!(plan.summary.file_count > 0, "没有需要修复的记录");
+    ensure!(
+        req.repair_fingerprint.as_deref() == Some(plan.summary.fingerprint.as_str()),
+        "检查后修复方案或聊天发生变化，请重新预览并确认"
+    );
+    let mut j =
+        journal::Journal::new_with_setup(&req.store_root, "VS Code 聊天记录修复", &|| {
+            claim_owner(req)?;
+            easy_switch_core::store::atomic_write(
+                &req.store_root.join("target.json"),
+                &serde_json::to_vec(&Target {
+                    home: req.home.clone(),
+                    sqlite_home: req.sqlite_home.clone(),
+                })?,
+            )
+        })?;
+    j.retain_backups()?;
+    easy_switch_core::store::atomic_write(
+        &j.dir.join("repair-report.json"),
+        &serde_json::to_vec_pretty(&plan.summary)?,
+    )?;
+    progress(Progress::new(
+        "修复聊天",
+        "加密备份原件，暂存修复副本",
+        0,
+        Some(plan.summary.file_count),
+    ));
+    plan.stage(&mut j)?;
+    plan.verify_databases(&settings(req))?;
+    let store_state = read_state(req)?;
+    j.commit_verified(progress, guard, &|| {
+        plan.verify()?;
+        plan.verify_databases(&settings(req))?;
+        ensure!(read_config(&req.home)?.0 == text, "修复期间配置发生变化");
+        Ok(())
+    })?;
+    Ok(
+        json!({"protocolVersion":PROTOCOL_VERSION,"committed":true,"activeProviderId":active_provider(&doc,&store_state),"repairedFileCount":plan.summary.file_count}),
     )
 }
 

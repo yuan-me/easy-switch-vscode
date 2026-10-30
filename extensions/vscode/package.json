@@ -2,7 +2,7 @@
   "name": "easy-switch-remote",
   "displayName": "Easy Switch",
   "description": "在 Linux Remote-SSH 中切换 Codex 官方/API 服务商，并保留原聊天。",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "easy-switch",
   "icon": "resources/icon.png",
   "license": "UNLICENSED",
@@ -106,6 +106,12 @@
         "title": "检查更新",
         "category": "Easy Switch",
         "icon": "$(cloud-download)"
+      },
+      {
+        "command": "easySwitch.repairHistories",
+        "title": "修复聊天记录",
+        "category": "Easy Switch",
+        "icon": "$(tools)"
       }
     ],
     "menus": {

@@ -206,15 +206,6 @@ impl Scanner {
         ct: &CancellationToken,
         progress: &impl Fn(crate::Progress),
     ) -> Result<Scan> {
-        self.scan_excluding(settings, ct, progress, &HashSet::new())
-    }
-    pub fn scan_excluding(
-        &mut self,
-        settings: &Settings,
-        ct: &CancellationToken,
-        progress: &impl Fn(crate::Progress),
-        excluded: &HashSet<PathBuf>,
-    ) -> Result<Scan> {
         progress(crate::Progress::new(
             "扫描会话",
             "检查数据库与会话目录",
@@ -257,9 +248,6 @@ impl Scanner {
                 while let Some(r) = rows.next()? {
                     cancellation(ct)?;
                     let p = owned(&PathBuf::from(r.get::<_, String>(4)?), settings)?;
-                    if excluded.contains(&path_key(&p)?) {
-                        continue;
-                    }
                     // Codex can retain indexes after rollout removal; leave those records untouched.
                     if !p.try_exists()? {
                         continue;
@@ -349,9 +337,6 @@ impl Scanner {
                     continue;
                 }
                 let path = normalize(entry.path())?;
-                if excluded.contains(&path_key(&path)?) {
-                    continue;
-                }
                 scanned += 1;
                 progress(crate::Progress::new(
                     "扫描会话",
@@ -710,17 +695,7 @@ pub fn stage_changes_with_progress(
     ct: &CancellationToken,
     progress: &impl Fn(crate::Progress),
 ) -> Result<()> {
-    stage_changes_inner(
-        j,
-        settings,
-        items,
-        action,
-        value,
-        None,
-        &HashSet::new(),
-        ct,
-        progress,
-    )
+    stage_changes_inner(j, settings, items, action, value, None, ct, progress)
 }
 pub fn stage_provider_with_model(
     j: &mut Journal,
@@ -728,27 +703,6 @@ pub fn stage_provider_with_model(
     items: &[Session],
     provider: &str,
     model: Option<&str>,
-    ct: &CancellationToken,
-    progress: &impl Fn(crate::Progress),
-) -> Result<()> {
-    stage_provider_with_model_excluding(
-        j,
-        settings,
-        items,
-        provider,
-        model,
-        &HashSet::new(),
-        ct,
-        progress,
-    )
-}
-pub fn stage_provider_with_model_excluding(
-    j: &mut Journal,
-    settings: &Settings,
-    items: &[Session],
-    provider: &str,
-    model: Option<&str>,
-    excluded: &HashSet<PathBuf>,
     ct: &CancellationToken,
     progress: &impl Fn(crate::Progress),
 ) -> Result<()> {
@@ -763,7 +717,6 @@ pub fn stage_provider_with_model_excluding(
         "provider",
         Some(provider),
         Some(model),
-        excluded,
         ct,
         progress,
     )
@@ -778,7 +731,6 @@ fn stage_changes_inner(
     action: &str,
     value: Option<&str>,
     model: Option<Option<&str>>,
-    excluded: &HashSet<PathBuf>,
     ct: &CancellationToken,
     progress: &impl Fn(crate::Progress),
 ) -> Result<()> {
@@ -832,7 +784,6 @@ fn stage_changes_inner(
             },
             value.context("缺少修改值")?,
             &projection_events,
-            excluded,
             ct,
             progress,
         )?
