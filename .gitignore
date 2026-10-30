@@ -1,0 +1,13 @@
+node_modules/
+out/
+dist/
+target/
+artifacts/
+__pycache__/
+*.pyc
+extensions/vscode/bin/
+*.vsix
+*.key
+*.pem
+.env*
+*.log
