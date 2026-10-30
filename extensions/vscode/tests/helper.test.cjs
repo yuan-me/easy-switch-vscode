@@ -29,3 +29,15 @@ test('structured helper errors cannot expose supplied secrets', () => fixture(as
 test('missing protocol version is rejected instead of showing a false success', () => fixture(async () => {
   await assert.rejects(runHelper(process.execPath, { ...request, operationId: 'malformed' }), /无法识别/);
 }));
+
+test('large skipped history reports retain all paths and redact request secrets', () => fixture(async () => {
+  const result = await runHelper(process.execPath, { ...request, operationId: 'skip-report' });
+  assert.equal(result.skippedHistories.length, 500);
+  assert.ok(result.skippedHistories[499].path.includes('499-'));
+  assert.ok(!JSON.stringify(result).includes(request.apiKey));
+  assert.ok(!JSON.stringify(result).includes(request.journalKey));
+}));
+
+test('malformed skipped history reports are rejected', () => fixture(async () => {
+  await assert.rejects(runHelper(process.execPath, { ...request, operationId: 'bad-report' }), /无法识别/);
+}));

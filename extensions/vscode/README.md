@@ -8,19 +8,19 @@
 
 1. 使用 VS Code 的 Remote-SSH 连接 Linux 服务器，并打开服务器上的项目。
 2. 在扩展页面确认官方 Codex（`openai.chatgpt`）已安装在 “SSH: 你的服务器”，且能正常打开。
-3. 在这个远程窗口运行命令 “Extensions: Install from VSIX...”，选择 `easy-switch-remote-0.1.5.vsix`。安装后确认 Easy Switch 也位于 “SSH: 你的服务器” 中。
+3. 在这个远程窗口运行命令 “Extensions: Install from VSIX...”，选择 `easy-switch-remote-0.1.6.vsix`。安装后确认 Easy Switch 也位于 “SSH: 你的服务器” 中。
 4. 打开活动栏中的 Easy Switch，核对目标服务器和 Codex 数据目录。不要在目录识别错误时继续操作。
 
 扩展包包含 Linux x64 和 arm64 工具；服务器无需安装 Rust、Node 构建工具或桌面版 Easy Switch。支持 Linux Remote-SSH，以及官方 Codex `26.1021.22027`、`26.1007.21434`、`26.1002.51308`、`26.51021.22027`。检查以服务器实际安装的版本为准，其他版本会停止切换。各版本的测试范围见 [兼容性说明](COMPATIBILITY.md)。
 
-从 0.1.2、0.1.3 或 0.1.4 升级时，直接安装新 VSIX 并重载窗口即可。服务商配置和密钥保留，已安装的只读管理员检查器无需重装。
+从 0.1.2—0.1.5 升级时，直接安装新 VSIX 并重载窗口即可。服务商配置和密钥保留，已安装的只读管理员检查器无需重装。
 
 ### 受保护的系统进程
 
-部分 Ubuntu 服务（例如用户级 systemd、PAM、ssh-agent、VMware 工具）虽然属于当前用户，仍不允许普通用户读取其可执行文件和文件占用。若提示需要只读管理员检查，在远端终端运行一次（以 0.1.5 为例）：
+部分 Ubuntu 服务（例如用户级 systemd、PAM、ssh-agent、VMware 工具）虽然属于当前用户，仍不允许普通用户读取其可执行文件和文件占用。若提示需要只读管理员检查，在远端终端运行一次（以 0.1.6 为例）：
 
 ```sh
-sudo sh ~/.vscode-server/extensions/easy-switch.easy-switch-remote-0.1.5/scripts/install-proc-audit.sh
+sudo sh ~/.vscode-server/extensions/easy-switch.easy-switch-remote-0.1.6/scripts/install-proc-audit.sh
 ```
 
 脚本要求 Python 3.9+ 和 sudo，安装 root 所有的 `/usr/local/lib/easy-switch/proc-audit.py`，并在 `/etc/sudoers.d/easy-switch-proc-audit-你的UID` 中仅允许当前用户免密运行这一固定检查命令。Python 使用隔离模式并禁止写入字节码；检查器只读取 `/proc` 中当前用户的进程身份与文件占用，不读取进程环境、API 密钥或聊天内容，不发送信号、不写入 Codex 文件。插件和切换工具本身保持普通用户权限。
@@ -59,7 +59,8 @@ sudo sh ~/.vscode-server/extensions/easy-switch.easy-switch-remote-0.1.5/scripts
 - 超长历史切换到更小的上下文窗口，或压缩配置摘要发生变化时，官方 Codex 可能先通过新服务商请求旧模型进行历史压缩。新服务商不支持该旧模型时仍可能报错；请保留历史并切回原服务商，不能保证所有长历史都能跨任意模型继续。
 - 中断操作会保留加密备份和操作清单。重新打开窗口后，先使用 “Easy Switch: 恢复中断的切换”，再发起新切换。请使用原客户端的 VS Code 用户资料恢复，避免丢失对应 SecretStorage 密钥。
 - 从 0.1.5 起，成功切换和恢复完成后也保留加密备份与清单，下一次切换不自动删除它们。副本保存在扩展全局存储目录内，会增加磁盘占用；完成操作的备份不会作为“待恢复”项目自动覆盖后续聊天。旧版本已经清理的备份无法找回。
-- 遇到 JSON 或 UTF-8 历史异常时，先根据报错中的文件和行号排查并保留原文件。升级插件不会自动修复、跳过或删除这些记录。
+- 从 0.1.6 起，遇到无效 JSON 或 UTF-8 时跳过整条聊天，继续迁移独立的完整聊天；损坏文件不删除、不覆盖、不补写，对应线程、目录和分页记录也保持原样。侧边栏“保留原样”项目可展开查看文件路径及原因。
+- 为保持分页引用有效，损坏聊天的上游、关联分支及同线程其他历史文件也会保留。损坏元数据无法确认关联时，保留所有分页聊天。确认框显示可迁移聊天数和保留文件数，两者单位不同；被跳过的聊天可能暂时无法继续使用。
 - 外部修改、忙碌的数据库、未知历史结构、无法确认进程身份或无法确认停写时，扩展会拒绝覆盖。不要手动替换仍在运行的 Codex 数据库。
 - 配置已经提交但窗口尚未重载时，使用 “Easy Switch: 重载窗口”。重载后发送一条消息，确认服务商连接正常。
 

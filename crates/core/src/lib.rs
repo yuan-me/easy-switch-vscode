@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod desktop;
 pub mod diagnostics;
 pub mod history;
+pub mod history_selection;
 pub mod journal;
 pub mod model;
 pub mod protocol;

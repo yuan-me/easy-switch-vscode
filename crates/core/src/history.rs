@@ -17,13 +17,22 @@ pub struct Header {
     pub base: Option<String>,
     pub base_offset: Option<u64>,
 }
+#[derive(Debug)]
+pub struct CorruptRecord(pub String);
+impl std::fmt::Display for CorruptRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for CorruptRecord {}
+
 pub(crate) fn parse_record(raw: &[u8], path: &Path, line: u64) -> Result<Value> {
     let text = std::str::from_utf8(raw).map_err(|e| {
-        anyhow::anyhow!(
+        CorruptRecord(format!(
             "聊天记录 UTF-8 编码无效：{}，第 {line} 行，第 {} 字节；已停止处理",
             path.display(),
             e.valid_up_to() + 1
-        )
+        ))
     })?;
     let text = text
         .trim_start_matches('\u{feff}')
@@ -34,12 +43,36 @@ pub(crate) fn parse_record(raw: &[u8], path: &Path, line: u64) -> Result<Value> 
             serde_json::error::Category::Syntax => "语法错误",
             _ => "数据格式错误",
         };
-        anyhow::anyhow!(
+        CorruptRecord(format!(
             "聊天记录 JSON 无效：{}，第 {line} 行，第 {} 列（{reason}）；已停止处理",
             path.display(),
             e.column()
-        )
+        ))
+        .into()
     })
+}
+
+pub fn validate_records(path: &Path, ct: &tokio_util::sync::CancellationToken) -> Result<()> {
+    sessions::no_links(path)?;
+    let mut input = BufReader::new(File::open(path)?);
+    let mut raw = vec![];
+    let mut line = 0;
+    loop {
+        ensure!(!ct.is_cancelled(), "操作已取消");
+        raw.clear();
+        let n = input
+            .by_ref()
+            .take(32 * 1024 * 1024 + 1)
+            .read_until(b'\n', &mut raw)?;
+        if n == 0 {
+            return Ok(());
+        }
+        ensure!(n <= 32 * 1024 * 1024, "单条会话事件超过 32 MiB");
+        line += 1;
+        if !raw.iter().all(u8::is_ascii_whitespace) {
+            parse_record(&raw, path, line)?;
+        }
+    }
 }
 pub fn header(path: &Path) -> Result<Header> {
     sessions::no_links(path)?;
@@ -611,6 +644,7 @@ pub fn stage_metadata(
         key,
         value,
         &std::collections::HashMap::new(),
+        &HashSet::new(),
         ct,
         progress,
     )
@@ -623,6 +657,7 @@ pub(crate) fn stage_metadata_with_events(
     key: &str,
     value: &str,
     events: &std::collections::HashMap<PathBuf, Vec<u8>>,
+    excluded: &HashSet<PathBuf>,
     ct: &tokio_util::sync::CancellationToken,
     progress: &impl Fn(crate::Progress),
 ) -> Result<std::collections::HashMap<String, OffsetShift>> {
@@ -656,6 +691,9 @@ pub(crate) fn stage_metadata_with_events(
                 continue;
             }
             let path = sessions::owned(entry.path(), settings)?;
+            if excluded.contains(&path_key(&path)?) {
+                continue;
+            }
             let m = MetadataLine::read(path)?;
             scanned += 1;
             progress(crate::Progress::new(

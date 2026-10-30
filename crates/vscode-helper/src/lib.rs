@@ -635,7 +635,14 @@ fn inspect(req: &Request) -> Result<Value> {
     } else {
         None
     };
-    let scan = sessions::Scanner::default().scan(&settings(req), &CancellationToken::new())?;
+    let ct = CancellationToken::new();
+    let selection = easy_switch_core::history_selection::Selection::read(&settings(req), &ct)?;
+    let scan = sessions::Scanner::default().scan_excluding(
+        &settings(req),
+        &ct,
+        &|_| {},
+        &selection.excluded,
+    )?;
     ensure!(
         scan.warnings.is_empty(),
         "会话扫描存在异常：{}",
@@ -659,7 +666,7 @@ fn inspect(req: &Request) -> Result<Value> {
     Ok(
         json!({"protocolVersion":PROTOCOL_VERSION,"home":req.home,"sqliteHome":req.sqlite_home,
         "activeProviderId":active_provider(&doc,&state),"operations":operations,
-        "sessionCount":scan.sessions.len(),"officialModel":official_model(&doc,&planned_state),
+        "sessionCount":scan.sessions.len(),"skippedHistories":selection.skipped,"officialModel":official_model(&doc,&planned_state),
         "configFingerprint":journal::hash_bytes(text.as_bytes())}),
     )
 }
@@ -693,7 +700,19 @@ fn switch(
             )
         })?;
     j.retain_backups()?;
-    let scan = sessions::Scanner::default().scan_with_progress(&settings, &ct, progress)?;
+    progress(Progress::new(
+        "检查聊天",
+        "检查完整性与分页关联，损坏聊天保留原样",
+        0,
+        None,
+    ));
+    let selection = easy_switch_core::history_selection::Selection::read(&settings, &ct)?;
+    let scan = sessions::Scanner::default().scan_excluding(
+        &settings,
+        &ct,
+        progress,
+        &selection.excluded,
+    )?;
     ensure!(
         scan.warnings.is_empty(),
         "会话扫描存在异常：{}",
@@ -713,7 +732,7 @@ fn switch(
         &req.home.join("config.toml"),
         Some(next.to_string().as_bytes()),
     )?;
-    sessions::stage_provider_with_model(
+    sessions::stage_provider_with_model_excluding(
         &mut j,
         &settings,
         &scan.sessions,
@@ -723,6 +742,7 @@ fn switch(
         next.get("model")
             .and_then(Item::as_str)
             .or(state.official_model.as_deref()),
+        &selection.excluded,
         &ct,
         progress,
     )?;
@@ -731,8 +751,15 @@ fn switch(
         Some(&serde_json::to_vec(&state)?),
     )?;
     let expected = next["model_provider"].as_str().unwrap();
+    selection.verify_preserved()?;
     j.commit_verified(progress, guard, &|| {
-        let verified = sessions::Scanner::default().scan(&settings, &ct)?;
+        selection.verify_preserved()?;
+        let verified = sessions::Scanner::default().scan_excluding(
+            &settings,
+            &ct,
+            &|_| {},
+            &selection.excluded,
+        )?;
         let identities = |items: &[sessions::Session]| {
             items
                 .iter()
@@ -754,7 +781,7 @@ fn switch(
         Ok(())
     })?;
     Ok(
-        json!({"protocolVersion":PROTOCOL_VERSION,"committed":true,"activeProviderId":state.active_provider_id,"sessionCount":scan.sessions.len()}),
+        json!({"protocolVersion":PROTOCOL_VERSION,"committed":true,"activeProviderId":state.active_provider_id,"sessionCount":scan.sessions.len(),"skippedHistories":selection.skipped}),
     )
 }
 

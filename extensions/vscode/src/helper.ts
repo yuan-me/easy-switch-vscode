@@ -3,7 +3,7 @@ import * as readline from 'node:readline';
 import type { Provider } from './storage';
 import type { Target } from './environment';
 export interface Operation { id: string; state: string; description: string; fileCount: number }
-export interface HelperResult { protocolVersion: 1; activeProviderId: string | null; operations?: Operation[]; sessionCount?: number | null; configFingerprint?: string | null; committed?: boolean; home?: string; sqliteHome?: string | null; officialModel?: string | null }
+export interface HelperResult { protocolVersion: 1; activeProviderId: string | null; operations?: Operation[]; sessionCount?: number | null; skippedHistories?: { path: string; reason: string }[]; configFingerprint?: string | null; committed?: boolean; home?: string; sqliteHome?: string | null; officialModel?: string | null }
 export interface Progress { type: 'progress'; stage: string; detail: string; completed?: number; total?: number }
 export interface HelperRequest extends Target {
   protocolVersion: 1; action: 'inspect' | 'switch' | 'recover'; storeRoot: string;
@@ -30,15 +30,20 @@ export function runHelper(binary: string, request: HelperRequest, onProgress: (v
     let received = 0;
     lines.on('line', line => {
       received += line.length;
-      if (line.length > 64 * 1024 || received > 16 * 1024 * 1024) { failure = '切换工具输出超过安全限制，请检查操作状态。'; return; }
+      if (line.length > 8 * 1024 * 1024 || received > 16 * 1024 * 1024) { failure = '切换工具输出超过安全限制，请检查操作状态。'; return; }
       try {
         const value: unknown = JSON.parse(line);
         if (!value || typeof value !== 'object') throw new Error();
         const event = value as Record<string, unknown>;
+        if (event.type !== 'result' && line.length > 64 * 1024) throw new Error();
         if (event.type === 'progress' && typeof event.stage === 'string' && typeof event.detail === 'string') onProgress({ type: 'progress', stage: safe(event.stage), detail: safe(event.detail), completed: typeof event.completed === 'number' ? event.completed : undefined, total: typeof event.total === 'number' ? event.total : undefined });
         else if (event.type === 'error' && typeof event.message === 'string') failure = safe(event.message);
         else if (event.type === 'result' && event.protocolVersion === 1 && (event.activeProviderId === null || typeof event.activeProviderId === 'string')) {
           if (result) throw new Error();
+          if (event.skippedHistories !== undefined) {
+            if (!Array.isArray(event.skippedHistories) || event.skippedHistories.some(item => !item || typeof item.path !== 'string' || typeof item.reason !== 'string')) throw new Error();
+            event.skippedHistories = event.skippedHistories.map(item => ({ path: safe(item.path), reason: safe(item.reason) }));
+          }
           result = event as unknown as HelperResult;
         } else throw new Error();
       } catch { failure = '切换工具返回了无法识别的数据，请刷新检查操作状态。'; }

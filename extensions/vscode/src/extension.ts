@@ -10,8 +10,8 @@ import { ProviderStore, official, validateProvider, validateOfficialModel, type 
 import { registerUpdates } from './updates';
 
 class Row extends vscode.TreeItem {
-  constructor(label: string, readonly provider?: Provider) {
-    super(label, vscode.TreeItemCollapsibleState.None);
+  constructor(label: string, readonly provider?: Provider, readonly children?: Row[]) {
+    super(label, children?.length ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
     if (provider) {
       this.id = provider.id;
       this.contextValue = provider.id === 'official' ? 'official-provider' : 'api-provider';
@@ -44,13 +44,26 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   }
   dispose(): void { this.status.dispose(); this.changed.dispose(); }
   getTreeItem(item: Row): vscode.TreeItem { return item; }
-  getChildren(): Row[] {
+  getChildren(element?: Row): Row[] {
+    if (element) return element.children ?? [];
     if (this.error) { const row = new Row(this.error); row.iconPath = new vscode.ThemeIcon('warning'); row.tooltip = this.error; return [row]; }
     if (!this.ready || !this.result) return [new Row('正在检查服务器配置…')];
     const rows = [new Row(`SSH · ${os.hostname()}`), new Row(this.ready.target.home)];
     rows[0]!.iconPath = new vscode.ThemeIcon('remote');
     rows[1]!.iconPath = new vscode.ThemeIcon('folder');
     rows[1]!.tooltip = `Codex 数据目录：${this.ready.target.home}\n数据库：${this.ready.target.sqliteHome ?? `${this.ready.target.home}/sqlite`}\n使用此目录的其他 Codex 窗口和 CLI 也会使用这份配置。`;
+    if (this.result.skippedHistories?.length) {
+      const children = this.result.skippedHistories.map(item => {
+        const row = new Row(path.basename(item.path));
+        row.description = '保留原样';
+        row.tooltip = `${item.path}\n${item.reason}\n此文件及对应线程记录不参与迁移，可能暂时无法继续聊天。`;
+        return row;
+      });
+      const skipped = new Row(`保留原样：${children.length} 个历史文件`, undefined, children);
+      skipped.iconPath = new vscode.ThemeIcon('warning');
+      skipped.tooltip = '展开查看损坏文件及需要一并保留的关联历史。它们不会被删除或覆盖，对应线程记录也不会迁移。';
+      rows.push(skipped);
+    }
     if (this.progress) { const p = new Row(this.progress); p.iconPath = new vscode.ThemeIcon('loading~spin'); rows.push(p); }
     if ((this.reloadPending || this.stopped) && !this.operationUncertain && !this.result.operations?.some(unfinished)) {
       const reload = new Row(this.reloadPending ? '配置已保存，点击重载窗口' : 'Codex 已停止，点击重载窗口');
@@ -217,7 +230,9 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     const configFingerprint = before.configFingerprint;
     if (!configFingerprint) throw new Error('切换工具没有返回配置指纹，无法安全提交。');
     officialModel = before.officialModel ?? officialModel;
-    const accepted = await vscode.window.showWarningMessage(`切换到“${provider.name}”并重载 VS Code？`, { modal: true, detail: `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n请先结束正在生成的任务。切换会停止当前窗口的 Codex、迁移已有聊天并更新共享配置。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。` }, '切换并重载');
+    this.update();
+    const skipped = before.skippedHistories?.length ?? 0;
+    const accepted = await vscode.window.showWarningMessage(`切换到“${provider.name}”并重载 VS Code？`, { modal: true, detail: `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n可迁移聊天：${before.sessionCount ?? '未知'} 个\n保留原样：${skipped} 个历史文件${skipped ? '（损坏或关联历史，详情见侧边栏）' : ''}\n\n请先结束正在生成的任务。切换会停止当前窗口的 Codex、迁移完整聊天并更新共享配置。被跳过的聊天及对应线程记录保持原样，可能暂时无法使用。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。` }, '切换并重载');
     if (!accepted) return;
     const journalKey = await ready.store.journalKey();
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Easy Switch', cancellable: false }, async progress => {

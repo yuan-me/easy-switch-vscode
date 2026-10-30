@@ -18,11 +18,11 @@ async function host(options, check) {
   const store = await ProviderStore.open(state, secretStorage, home);
   await store.save(provider, 'test-key');
   let view, phase = options.pending ? 'pending' : 'ready', activated = 0, inspections = 0;
-  const snapshot = () => ({ type: 'result', protocolVersion: 1, home, sqliteHome: options.removeSqliteConfig && inspections > 1 ? options.envSqlite ?? null : '/data/sqlite', activeProviderId: 'official', officialModel: options.officialModel === undefined ? 'official-model' : options.officialModel, configFingerprint: phase === 'pending' ? null : 'fingerprint', sessionCount: phase === 'pending' ? null : 2, operations: phase === 'pending' ? pending : [] });
+  const snapshot = () => ({ type: 'result', protocolVersion: 1, home, sqliteHome: options.removeSqliteConfig && inspections > 1 ? options.envSqlite ?? null : '/data/sqlite', activeProviderId: 'official', officialModel: options.officialModel === undefined ? 'official-model' : options.officialModel, configFingerprint: phase === 'pending' ? null : 'fingerprint', sessionCount: phase === 'pending' ? null : 2, operations: phase === 'pending' ? pending : [], skippedHistories: options.skippedHistories ?? [] });
   const codex = { extensionKind: 2, extensionPath: '/extensions/openai.chatgpt', packageJSON: { version: options.version ?? '26.1021.22027' }, activate: async () => { activated++; } };
   class Disposable { dispose() {} }
   const vscode = {
-    TreeItem: class { constructor(label) { this.label = label; } }, TreeItemCollapsibleState: { None: 0 },
+    TreeItem: class { constructor(label, collapsibleState) { this.label = label; this.collapsibleState = collapsibleState; } }, TreeItemCollapsibleState: { None: 0, Collapsed: 1 },
     ThemeIcon: class { constructor(id) { this.id = id; } }, ThemeColor: class {},
     EventEmitter: class extends Disposable { event = () => new Disposable(); fire() {} },
     StatusBarAlignment: { Left: 1 }, ProgressLocation: { Notification: 15 }, ExtensionKind: { Workspace: 2 },
@@ -36,7 +36,7 @@ async function host(options, check) {
     window: {
       createStatusBarItem: () => ({ show() {}, dispose() {} }),
       registerTreeDataProvider: (_, provider) => { view = provider; return new Disposable(); },
-      showWarningMessage: async (message) => { messages.push(message); return message.startsWith('切换到') ? '切换并重载' : undefined; },
+      showWarningMessage: async (message, options) => { messages.push(message); if (options?.detail) events.push({ detail: options.detail }); return message.startsWith('切换到') ? '切换并重载' : undefined; },
       showErrorMessage: async (message, ...actions) => { messages.push(message); events.push({ errorActions: actions }); },
       showInformationMessage: async message => { messages.push(message); },
       showQuickPick: async items => items.find(item => item.provider?.id === provider.id),
@@ -54,7 +54,7 @@ async function host(options, check) {
     events.push({ mutation: structuredClone(request) });
     if (options.mutationFails) { phase = 'pending'; throw Error('模拟部分提交'); }
     phase = 'ready';
-    return { type: 'result', protocolVersion: 1, committed: true, activeProviderId: provider.id };
+    return { type: 'result', protocolVersion: 1, committed: true, activeProviderId: provider.id, skippedHistories: options.skippedHistories ?? [] };
   };
   Object.defineProperty(process, 'platform', { value: 'linux' });
   try {
@@ -83,6 +83,22 @@ test('target validation precedes backend stop and displays inspected directory w
   assert.ok(!events.includes('modelInput'));
   assert.equal(mutation.sqliteHome, undefined);
   assert.deepEqual(mutation.projectDirs, ['/project']);
+  assert.equal(events.at(-1), 'reload');
+}));
+
+test('skipped histories stay visible before and after switch and are disclosed in confirmation', () => host({ skippedHistories: [{ path: home + '/sessions/bad.jsonl', reason: '第 35 行 JSON 无效' }] }, async ({ commands, events, view }) => {
+  const check = () => {
+    const row = view.getChildren().find(row => String(row.label).includes('保留原样：1'));
+    assert.equal(row.collapsibleState, 1);
+    const child = view.getChildren(row)[0];
+    assert.equal(child.label, 'bad.jsonl');
+    assert.ok(child.tooltip.includes('第 35 行'));
+    assert.ok(child.tooltip.includes(home + '/sessions/bad.jsonl'));
+  };
+  check();
+  await commands.get('easySwitch.switchProvider')({ provider });
+  check();
+  assert.ok(events.find(e => e.detail)?.detail.includes('保留原样：1 个历史文件'));
   assert.equal(events.at(-1), 'reload');
 }));
 test('unknown official model can be cancelled before preflight or backend stop', () => host({ officialModel: null }, async ({ commands, events, inputs }) => {
