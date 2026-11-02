@@ -81,6 +81,7 @@ jobs:
       - run: npm test
       - run: node --test scripts/package.test.mjs
       - run: python3 scripts/qemu-test.py --self-test
+      - run: python3 scripts/cleanup_test.py
       - name: Check release tag
         if: startsWith(github.ref, 'refs/tags/')
         run: node -e 'const p=require("./package.json"); if(process.env.GITHUB_REF_NAME !== "v"+p.version) throw Error("Tag and package version differ")'
@@ -110,4 +111,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/*.vsix release/*.vsix.json --verify-tag --title "Easy Switch $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          gh release create "$GITHUB_REF_NAME" release/*.vsix release/*.vsix.json extensions/vscode/scripts/cleanup-failed.py --verify-tag --title "Easy Switch $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md

@@ -337,7 +337,7 @@ fn validate_paths(req: &Request) -> Result<()> {
     ensure!(
         matches!(
             req.action.as_str(),
-            "inspect" | "switch" | "recover" | "repair"
+            "inspect" | "switch" | "recover" | "repair" | "cleanup"
         ),
         "不支持的操作"
     );
@@ -610,6 +610,11 @@ pub fn execute(req: &Request, progress: &impl Fn(Progress)) -> Result<Value> {
         "switch" => switch(&req, progress, &|| Ok(())),
         "recover" => recover(&req, &|| Ok(())),
         "repair" => repair(&req, progress, &|| Ok(())),
+        "cleanup" => {
+            check_owner(&req)?;
+            journal::cleanup_failed(&req.store_root)?;
+            Ok(json!({"protocolVersion":PROTOCOL_VERSION,"activeProviderId":null,"cleaned":true}))
+        }
         _ => unreachable!(),
     }
 }
@@ -727,6 +732,7 @@ fn switch(
             )
         })?;
     j.retain_backups()?;
+    j.use_delta_history();
     let repair = easy_switch_core::history_repair::Plan::read(&settings, &ct)?;
     ensure!(
         repair.summary.file_count == 0,

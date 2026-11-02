@@ -850,6 +850,7 @@ pub(crate) fn stage_metadata_with_events(
             continue;
         }
         let temp = journal.dir.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+        crate::journal::ensure_space(&journal.dir, std::fs::metadata(&m.path)?.len())?;
         let result = (|| -> Result<()> {
             let before = crate::journal::hash(&m.path)?;
             let mut input = BufReader::new(File::open(&m.path)?);

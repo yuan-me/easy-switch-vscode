@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { absolutePath, discoverTarget, type Target } from './environment';
 import { supportedCodexVersions } from './compatibility';
 import { confirmManualStop } from './manualStop';
-import { runHelper, type HelperRequest, type HelperResult, type Operation } from './helper';
+import { runHelper, progressMessage, type HelperRequest, type HelperResult, type Operation } from './helper';
 import { ProviderStore, official, validateProvider, validateOfficialModel, type Provider } from './storage';
 import { registerUpdates } from './updates';
 
@@ -260,7 +260,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     this.update();
     const settings = before.settingsPlan;
     if (settings && ready.codex.packageJSON.version !== '26.1021.22027') throw new Error('旧聊天设置初始化目前已验证官方 Codex 26.1021.22027，请在服务器端使用此版本后重试。聊天未修改。');
-    const settingsDetail = settings ? `\n\n发现 ${settings.fileCount} 个旧聊天缺少自身的设置快照。本次会加密备份原件，并为这些聊天建立新设置：只读文件、网络受限、需要时向你申请权限，协作模式为默认。旧审批、协作模式、推理偏好和插件禁用列表无法可靠还原，将使用新设置的默认值；不会复制父聊天的权限。消息正文、线程关系和归档状态保留，已有有效快照的聊天保留原设置。切换后如需写文件，请在官方 Codex 中调整权限。\n\n待初始化的文件：\n${settings.items.slice(0, 10).map(i => i.path).join('\n')}${settings.fileCount > 10 ? `\n另有 ${settings.fileCount - 10} 个文件。` : ''}` : '';
+    const settingsDetail = settings ? `\n\n发现 ${settings.fileCount} 个旧聊天缺少自身的设置快照。本次会保存加密恢复信息（大聊天优先使用差量），并为这些聊天建立新设置：只读文件、网络受限、需要时向你申请权限，协作模式为默认。旧审批、协作模式、推理偏好和插件禁用列表无法可靠还原，将使用新设置的默认值；不会复制父聊天的权限。消息正文、线程关系和归档状态保留，已有有效快照的聊天保留原设置。切换后如需写文件，请在官方 Codex 中调整权限。\n\n待初始化的文件：\n${settings.items.slice(0, 10).map(i => i.path).join('\n')}${settings.fileCount > 10 ? `\n另有 ${settings.fileCount - 10} 个文件。` : ''}` : '';
     const accepted = await confirmManualStop(`切换到“${provider.name}”并重载 VS Code？`, `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n切换会迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。${settingsDetail}`, settings ? '初始化旧聊天设置并切换' : '切换并重载');
     if (!accepted) return;
     const journalKey = await ready.store.journalKey();
@@ -269,7 +269,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
 
       this.operationUncertain = true;
       const result = await runHelper(ready.binary, { ...this.request(ready, 'switch'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, journalKey, expectedConfigFingerprint: configFingerprint, officialModel, settingsFingerprint: settings?.fingerprint }, event => {
-        this.progress = `${event.stage}：${event.detail}`; this.update(); progress.report({ message: this.progress });
+        this.progress = progressMessage(event); this.update(); progress.report({ message: this.progress });
       });
       if (!result.committed) throw new Error('切换结果尚未确认。请刷新并检查是否有待恢复的操作。');
       this.result = result; this.operationUncertain = false; this.reloadPending = true; this.update();
@@ -295,7 +295,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (!accepted) return;
     const journalKey = await ready.store.journalKey(false);
     this.operationUncertain = true;
-    const result = await runHelper(ready.binary, { ...this.request(ready, 'recover'), operationId: choice.id, journalKey }, event => { this.progress = `${event.stage}：${event.detail}`; this.update(); });
+    const result = await runHelper(ready.binary, { ...this.request(ready, 'recover'), operationId: choice.id, journalKey }, event => { this.progress = progressMessage(event); this.update(); });
     if (!result.committed) throw new Error('恢复结果尚未确认。请刷新并检查待恢复的操作。');
     this.result = result; this.operationUncertain = false; this.reloadPending = true; this.update();
     await this.reload();
@@ -318,12 +318,18 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
       this.operationUncertain = true;
       const result = await runHelper(ready.binary, { ...this.request(ready, 'repair'), journalKey,
         expectedConfigFingerprint: snapshot.configFingerprint!, repairFingerprint: plan.fingerprint }, event => {
-        this.progress = `${event.stage}：${event.detail}`; this.update(); progress.report({ message: this.progress });
+        this.progress = progressMessage(event); this.update(); progress.report({ message: this.progress });
       });
       if (!result.committed) throw new Error('修复结果尚未确认，请刷新并检查中断操作。');
       this.result = result; this.operationUncertain = false; this.reloadPending = true; this.update();
     });
     await this.reload();
+  }
+  async cleanupFiles(): Promise<void> {
+    const ready = this.requireReady();
+    await runHelper(ready.binary, this.request(ready, 'cleanup'));
+    void vscode.window.showInformationMessage('已清理未提交或已完成回滚的失败操作文件，以及成功操作的提交副本。聊天、成功操作的恢复备份和未完成回滚所需文件保留。');
+    await this.refresh();
   }
   private ensureStable(): void {
     this.requireReady();
@@ -354,7 +360,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const commands: Record<string, (row?: Row) => Promise<void>> = {
     addProvider: () => view.edit(undefined, true), editProvider: row => view.edit(row), removeProvider: row => view.remove(row),
     switchProvider: row => view.switch(row), refresh: () => view.refresh(), recover: () => view.recover(), reload: () => view.reload(),
-    openCodex: () => view.openCodex(), repairHistories: () => view.repairHistories(), showError: () => view.showError()
+    openCodex: () => view.openCodex(), repairHistories: () => view.repairHistories(), cleanupFiles: () => view.cleanupFiles(), showError: () => view.showError()
   };
   for (const [name, callback] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`easySwitch.${name}`, (row?: Row) => view.command(() => callback(row))));
   await vscode.commands.executeCommand('setContext', 'easySwitch.busy', false);

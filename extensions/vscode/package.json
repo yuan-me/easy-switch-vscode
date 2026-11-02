@@ -2,7 +2,7 @@
   "name": "easy-switch-remote",
   "displayName": "Easy Switch",
   "description": "在 Linux Remote-SSH 中切换 Codex 官方/API 服务商，并保留原聊天。",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "publisher": "easy-switch",
   "icon": "resources/icon.png",
   "license": "UNLICENSED",
@@ -125,6 +125,10 @@
         "command": "easySwitch.showError",
         "title": "查看错误详情",
         "category": "Easy Switch"
+      },
+      {
+        "command": "easySwitch.cleanupFiles",
+        "title": "Easy Switch: 清理失败操作临时文件"
       }
     ],
     "menus": {

@@ -1,7 +1,14 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const path = require('node:path');
-const { runHelper } = require('../out/helper');
+const { runHelper, progressMessage } = require('../out/helper');
+test('subtask percentages use measured counts and never fabricate unknown progress', () => {
+  const event = { type: 'progress', stage: '修复会话', detail: '处理文件' };
+  assert.equal(progressMessage({ ...event, completed: 7, total: 10 }), '修复会话：处理文件 · 70%（7/10）');
+  assert.match(progressMessage({ ...event, completed: 10, total: 10 }), /100%/);
+  assert.match(progressMessage({ ...event, completed: 0, total: 10 }), /0%/);
+  for (const counts of [{}, { completed: 0, total: 0 }, { completed: 2, total: 1 }, { completed: -1, total: 10 }, { completed: NaN, total: 10 }]) assert.equal(progressMessage({ ...event, ...counts }), '修复会话：处理文件');
+});
 const request = { protocolVersion: 1, action: 'inspect', home: '/synthetic', storeRoot: '/synthetic/store', apiKey: 'test-api-secret', journalKey: 'test-journal-secret', officialModel: 'official-model' };
 async function fixture(callback) {
   const before = process.env.NODE_OPTIONS;

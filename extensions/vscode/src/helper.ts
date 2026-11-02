@@ -7,8 +7,13 @@ export interface RepairPlan { fingerprint: string; fileCount: number; items: { p
 export interface SettingsPlan { fingerprint: string; fileCount: number; items: { threadId: string; path: string; sourceHash: string }[] }
 export interface HelperResult { protocolVersion: 1; activeProviderId: string | null; operations?: Operation[]; sessionCount?: number | null; repairPlan?: RepairPlan; settingsPlan?: SettingsPlan; repairedFileCount?: number; configFingerprint?: string | null; committed?: boolean; home?: string; sqliteHome?: string | null; officialModel?: string | null }
 export interface Progress { type: 'progress'; stage: string; detail: string; completed?: number; total?: number }
+export function progressMessage(event: Progress): string {
+  const { completed, total } = event;
+  const measured = Number.isSafeInteger(completed) && Number.isSafeInteger(total) && total! > 0 && completed! >= 0 && completed! <= total!;
+  return `${event.stage}：${event.detail}${measured ? ` · ${Math.floor(completed! / total! * 100)}%（${completed}/${total}）` : ''}`;
+}
 export interface HelperRequest extends Target {
-  protocolVersion: 1; action: 'inspect' | 'switch' | 'recover' | 'repair'; storeRoot: string;
+  protocolVersion: 1; action: 'inspect' | 'switch' | 'recover' | 'repair' | 'cleanup'; storeRoot: string;
   provider?: Provider | { id: 'official' }; apiKey?: string; journalKey?: string;
   operationId?: string; expectedConfigFingerprint?: string; projectDirs?: string[]; officialModel?: string;
   repairFingerprint?: string;

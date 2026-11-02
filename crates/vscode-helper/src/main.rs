@@ -37,7 +37,7 @@ fn run(secrets: &mut Vec<String>) -> Result<()> {
     if let Some(key) = &req.journal_key {
         secrets.push(key.clone());
     }
-    if req.action != "inspect" {
+    if !matches!(req.action.as_str(), "inspect" | "cleanup") {
         let encoded = req
             .journal_key
             .as_deref()

@@ -8,6 +8,7 @@ use std::{
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
+mod delta;
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -24,11 +25,15 @@ pub struct Change {
     pub stage: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     patch: Option<FilePatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    backup_hash: Option<String>,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 struct FilePatch {
     start: u64,
     end: u64,
+    #[serde(default)]
+    middle: bool,
 }
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +115,16 @@ fn cleanup_operation(dir: &Path, m: &Manifest) -> Result<()> {
         return remove_operation(dir);
     }
     crate::sessions::no_links(dir)?;
+    for stage in m.files.iter().filter_map(|c| c.stage.as_ref()) {
+        if stage.exists() {
+            safe_payload(stage, dir)?;
+            ensure!(
+                stage.extension().is_some_and(|s| s == "after") && stage.is_file(),
+                "暂存文件路径无效"
+            );
+            fs::remove_file(stage)?;
+        }
+    }
     // A crash can leave plaintext rewrite/SQLite scratch files beside encrypted payloads.
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -166,7 +181,7 @@ fn cleanup_temps(m: &Manifest, allowed: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-fn cleanup_locked(root: &Path, allowed: &[PathBuf]) -> Result<()> {
+fn cleanup_locked(root: &Path, allowed: &[PathBuf], discard_restored: bool) -> Result<()> {
     let ops = root.join("operations");
     crate::sessions::no_links(&ops)?;
     if !ops.exists() {
@@ -195,7 +210,11 @@ fn cleanup_locked(root: &Path, allowed: &[PathBuf]) -> Result<()> {
             // Preparing is persisted before staging; no target is written before Applying.
             if finished(&m.state) || m.state == "Preparing" {
                 cleanup_temps(&m, allowed)?;
-                cleanup_operation(&dir, &m)?;
+                if discard_restored && m.state == "Restored" {
+                    remove_operation(&dir)?;
+                } else {
+                    cleanup_operation(&dir, &m)?;
+                }
             }
             Ok(())
         })();
@@ -216,7 +235,14 @@ pub fn cleanup(root: &Path, allowed: &[PathBuf]) -> Result<()> {
         return Ok(());
     }
     let _lock = lock(root)?;
-    cleanup_locked(root, allowed)
+    cleanup_locked(root, allowed, false)
+}
+pub fn cleanup_failed(root: &Path) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    let _lock = lock(root)?;
+    cleanup_locked(root, &[], true)
 }
 pub fn hash(path: &Path) -> Result<Option<String>> {
     if !path.exists() {
@@ -236,6 +262,22 @@ pub fn hash(path: &Path) -> Result<Option<String>> {
 }
 pub fn hash_bytes(bytes: &[u8]) -> String {
     format!("{:X}", Sha256::digest(bytes))
+}
+pub fn ensure_space(path: &Path, bytes: u64) -> Result<()> {
+    let existing = path
+        .ancestors()
+        .find(|p| p.exists())
+        .context("无法检查磁盘空间")?;
+    let available = fs2::available_space(existing)?;
+    let required = bytes.saturating_add(64 * 1024 * 1024);
+    ensure!(
+        available >= required,
+        "磁盘空间不足，已停止写入：{}；此步骤至少需要 {} MiB（含 64 MiB 余量），可用 {} MiB。请勿反复重试或删除中断恢复文件。",
+        existing.display(),
+        required.div_ceil(1024 * 1024),
+        available / (1024 * 1024)
+    );
+    Ok(())
 }
 fn matching_edges(before: &mut File, after: &mut File) -> Result<(u64, u64)> {
     let old_len = before.metadata()?.len();
@@ -304,6 +346,7 @@ pub fn list(root: &Path, legacy: bool) -> Result<Vec<OperationInfo>> {
     Ok(all)
 }
 pub struct Journal {
+    compact_history: bool,
     pub dir: PathBuf,
     pub manifest: Manifest,
     _lock: File,
@@ -319,7 +362,7 @@ impl Journal {
     ) -> Result<Self> {
         crate::store::private_dir(root)?;
         let lock = lock(root)?;
-        cleanup_locked(root, &[])?;
+        cleanup_locked(root, &[], false)?;
         let ops = root.join("operations");
         crate::store::private_dir(&ops)?;
         ensure!(
@@ -334,6 +377,7 @@ impl Journal {
         ));
         crate::store::private_dir(&dir)?;
         let j = Self {
+            compact_history: false,
             dir,
             manifest: Manifest {
                 state: "Preparing".into(),
@@ -356,7 +400,16 @@ impl Journal {
         self.manifest.retain_backups = true;
         self.save()
     }
+    pub fn use_delta_history(&mut self) {
+        self.compact_history = true;
+    }
     pub fn stage(&mut self, path: &Path, data: Option<&[u8]>) -> Result<()> {
+        ensure_space(
+            &self.dir,
+            fs::metadata(path)
+                .map_or(0, |m| m.len())
+                .saturating_add(data.map_or(0, |d| d.len() as u64)),
+        )?;
         self.stage_reader(
             path,
             data.map(|d| Box::new(std::io::Cursor::new(d.to_vec())) as Box<dyn Read>),
@@ -382,9 +435,66 @@ impl Journal {
             path.display()
         );
         let after = hash(source)?;
+        if before == after {
+            return Ok(());
+        }
         let mut reader = File::open(source)?;
         if before.is_some() && before != after {
             let (start, suffix) = matching_edges(&mut File::open(path)?, &mut reader)?;
+            if self.compact_history && path.extension().is_some_and(|e| e == "jsonl") {
+                if let Some((old, new)) =
+                    delta::prepare(&mut File::open(path)?, &mut reader, start)?
+                {
+                    let normalized = crate::sessions::path_key(path)?;
+                    ensure!(
+                        !self
+                            .manifest
+                            .files
+                            .iter()
+                            .any(|c| crate::sessions::path_key(&c.path)
+                                .is_ok_and(|p| p == normalized)),
+                        "重复写入同一个文件"
+                    );
+                    ensure_space(&self.dir, (old.len() + new.len()) as u64 * 2)?;
+                    let id = uuid::Uuid::new_v4();
+                    let backup = self.dir.join(format!("{id}.before"));
+                    let stage = self.dir.join(format!("{id}.after"));
+                    let backup_hash = Some(hash_bytes(&old));
+                    crypto::encrypt_reader(std::io::Cursor::new(old), &backup)?;
+                    verify_payload(Some(&backup), &backup_hash, &self.dir)?;
+                    let mut restored = HashWriter(Sha256::new());
+                    delta::write(&backup, source, &mut restored)?;
+                    ensure!(
+                        Some(format!("{:X}", restored.0.finalize())) == before,
+                        "差量无法还原原文件，未提交"
+                    );
+                    crypto::encrypt_reader(std::io::Cursor::new(new), &stage)?;
+                    ensure!(
+                        hash(path)? == before && hash(source)? == after,
+                        "差量暂存期间文件被修改"
+                    );
+                    self.manifest.files.push(Change {
+                        path: path.to_owned(),
+                        before_hash: before,
+                        after_hash: after,
+                        backup: Some(backup),
+                        stage: Some(stage),
+                        patch: Some(FilePatch {
+                            start: 0,
+                            end: 0,
+                            middle: true,
+                        }),
+                        backup_hash,
+                    });
+                    return self.save();
+                }
+            }
+            ensure_space(
+                &self.dir,
+                fs::metadata(path)?
+                    .len()
+                    .saturating_add(reader.metadata()?.len()),
+            )?;
             // Retain full encrypted backups; avoid encrypting unchanged bodies a second time.
             if start + suffix >= 64 * 1024 {
                 let end = fs::metadata(path)?
@@ -402,11 +512,21 @@ impl Journal {
                     path,
                     Some(Box::new(reader.take(replacement_len))),
                     after,
-                    Some(FilePatch { start, end }),
+                    Some(FilePatch {
+                        start,
+                        end,
+                        middle: false,
+                    }),
                     Some(&before),
                 );
             }
         }
+        ensure_space(
+            &self.dir,
+            fs::metadata(path)
+                .map_or(0, |m| m.len())
+                .saturating_add(reader.metadata()?.len()),
+        )?;
         reader.rewind()?;
         self.stage_reader(path, Some(Box::new(reader)), after, None, Some(&before))
     }
@@ -469,6 +589,7 @@ impl Journal {
             backup,
             stage,
             patch,
+            backup_hash: None,
         });
         self.save()
     }
@@ -515,6 +636,11 @@ impl Journal {
             report("校验源文件与备份摘要（此阶段不可取消）", i, Some(total));
             ensure!(hash(&c.path)? == c.before_hash, "文件已被外部修改，未提交");
             check_wal(&c.path)?;
+            verify_payload(
+                c.backup.as_deref(),
+                &c.backup_hash.clone().or(c.before_hash.clone()),
+                &self.dir,
+            )?;
             if let Some(patch) = &c.patch {
                 let stage = c.stage.as_deref().context("暂存记录缺少文件")?;
                 safe_payload(stage, &self.dir)?;
@@ -639,6 +765,9 @@ fn write_payload(
     mut out: impl Write,
 ) -> Result<()> {
     if let Some(patch) = patch {
+        if patch.middle {
+            return delta::write(payload, source, out);
+        }
         let mut input = File::open(source)?;
         ensure!(
             patch.start <= patch.end && patch.end <= input.metadata()?.len(),
@@ -665,6 +794,12 @@ fn replace(
 ) -> Result<()> {
     if let Some(p) = payload {
         let parent = dest.parent().context("目标路径没有父目录")?;
+        ensure_space(
+            parent,
+            fs::metadata(dest)
+                .map_or(0, |m| m.len())
+                .saturating_add(fs::metadata(p)?.len()),
+        )?;
         crate::store::private_dir(parent)?;
         let temp = parent.join(format!(".easy-switch-{}.restore", uuid::Uuid::new_v4()));
         let result = (|| {
@@ -715,7 +850,11 @@ fn verify_restore(dir: &Path, m: &Manifest) -> Result<()> {
             c.path.display()
         );
         check_wal(&c.path)?;
-        verify_payload(c.backup.as_deref(), &c.before_hash, dir)?;
+        verify_payload(
+            c.backup.as_deref(),
+            &c.backup_hash.clone().or(c.before_hash.clone()),
+            dir,
+        )?;
     }
     Ok(())
 }
@@ -731,7 +870,12 @@ fn rollback_manifest(dir: &Path, m: &mut Manifest, guard: &impl Fn() -> Result<(
         );
         check_wal(&c.path)?;
         if current != c.before_hash {
-            replace(c.backup.as_deref(), &c.path, None, &c.before_hash)?;
+            replace(
+                c.backup.as_deref(),
+                &c.path,
+                c.patch.as_ref().filter(|p| p.middle),
+                &c.before_hash,
+            )?;
             ensure!(hash(&c.path)? == c.before_hash, "恢复校验失败");
         }
     }

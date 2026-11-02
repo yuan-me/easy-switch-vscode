@@ -100,7 +100,7 @@ async function host(options, check) {
       showInformationMessage: async message => { messages.push(message); },
       showQuickPick: async items => items.find(item => item.provider?.id === provider.id),
       showInputBox: async input => { inputs.push(input); events.push('modelInput'); return options.modelInput; },
-      withProgress: async (_, callback) => callback({ report() {} })
+      withProgress: async (_, callback) => callback({ report(value) { events.push({ progress: value.message }); } })
     }
   };
   const saved = { load: Module._load, access: fs.access, run: helper.runHelper, discover: environment.discoverTarget, platform: Object.getOwnPropertyDescriptor(process, 'platform') };
@@ -109,9 +109,10 @@ async function host(options, check) {
   environment.discoverTarget = async () => ({ home, ...(options.envSqlite ? { sqliteHome: options.envSqlite } : {}) });
   const manual = require('../out/manualStop'), savedConfirm = manual.confirmManualStop;
   manual.confirmManualStop = async (title, detail) => { events.push('confirm'); events.push({ detail }); return title.startsWith('修复聊天') ? !!options.acceptRepair : !options.cancelConfirmation; };
-  helper.runHelper = async (_, request) => {
+  helper.runHelper = async (_, request, onProgress) => {
     if (request.action === 'inspect') { inspections++; if (options.pendingDuringPreflight && inspections > 1) phase = 'pending'; events.push({ inspect: structuredClone(request) }); if (options.inspectFails || (options.failAfterFirstInspection && inspections > 1)) throw Error('会话扫描存在异常：synthetic.jsonl：会话元数据重复且无法确认继承关系'); return snapshot(); }
     events.push({ mutation: structuredClone(request) });
+    if (options.progressEvent && onProgress) onProgress(options.progressEvent);
     if (options.mutationFails) { phase = 'pending'; throw Error('模拟部分提交'); }
     phase = 'ready';
     if (request.action === 'repair') repaired = true;
@@ -145,6 +146,17 @@ test('target validation precedes manual confirmation and displays inspected dire
   assert.equal(mutation.sqliteHome, undefined);
   assert.deepEqual(mutation.projectDirs, ['/project']);
   assert.equal(events.filter(e => typeof e === 'string').at(-1), 'reload');
+}));
+
+test('switch displays measured subtask percentage in the progress notification', () => host({ progressEvent: { stage: '修复会话', detail: '处理文件', completed: 7, total: 10 } }, async ({ commands, events }) => {
+  await commands.get('easySwitch.switchProvider')({ provider });
+  assert.ok(events.some(e => e.progress?.includes('70%（7/10）')));
+}));
+
+test('cleanup command dispatches only cleanup without switching or reloading', () => host({}, async ({ commands, events }) => {
+  await commands.get('easySwitch.cleanupFiles')();
+  assert.deepEqual(events.filter(e => e.mutation).map(e => e.mutation.action), ['cleanup']);
+  assert.ok(!events.includes('reload'));
 }));
 
 test('startup scan error keeps providers, target, actions and full diagnostics visible', () => host({ inspectFails: true }, async ({ options, commands, events, view, inputs }) => {

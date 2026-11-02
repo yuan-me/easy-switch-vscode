@@ -650,6 +650,7 @@ pub fn stage_database(
     change: impl FnOnce(&Connection) -> Result<()>,
 ) -> Result<()> {
     no_links(path)?;
+    journal::ensure_space(&j.dir, fs::metadata(path)?.len().saturating_mul(3))?;
     let source = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     source.busy_timeout(std::time::Duration::from_secs(2))?;
     let busy: i64 = source.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
@@ -845,6 +846,7 @@ fn stage_changes_inner(
                     continue;
                 }
                 let temp = j.dir.join(format!("{}.jsonl", uuid::Uuid::new_v4()));
+                journal::ensure_space(&j.dir, fs::metadata(&path)?.len())?;
                 let result = (|| {
                     let before = journal::hash(&path)?;
                     patch_metadata(

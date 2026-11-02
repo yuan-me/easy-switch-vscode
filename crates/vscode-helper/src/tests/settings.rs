@@ -251,3 +251,61 @@ fn staging_cannot_initialize_an_additional_unconfirmed_thread() {
         config
     );
 }
+
+#[test]
+fn large_history_switch_uses_compact_backups_across_provider_changes() {
+    let mut f = Fixture::new();
+    let original = missing(&f, false);
+    fs::write(&f.rollout, format!("{original}{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{}\"}}}}\n", "x".repeat(1024 * 1024))).unwrap();
+    for id in ["a", "b", "official"] {
+        f.select(id, "target");
+        let preview = inspect(&f.request).unwrap();
+        f.request.settings_fingerprint = preview["settingsPlan"]["fingerprint"]
+            .as_str()
+            .map(str::to_owned);
+        f.run().unwrap();
+        let operations = journal::list(&f.request.store_root.join("operations"), false).unwrap();
+        for operation in operations {
+            let dir = f.request.store_root.join("operations").join(operation.id);
+            let manifest: journal::Manifest =
+                serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+            let change = manifest.files.iter().find(|c| c.path == f.rollout).unwrap();
+            assert!(fs::metadata(change.backup.as_ref().unwrap()).unwrap().len() < 32768);
+            assert!(!change.stage.as_ref().unwrap().exists());
+        }
+    }
+}
+
+#[test]
+fn cleanup_dispatch_removes_failed_staging_but_preserves_partial_commit_recovery() {
+    let mut f = Fixture::new();
+    let original = fs::read(&f.rollout).unwrap();
+    for state in ["Preparing", "Restored", "Applying"] {
+        let mut j = journal::Journal::new(&f.request.store_root, "cleanup proof").unwrap();
+        j.stage(&f.rollout, Some(b"replacement")).unwrap();
+        let dir = j.dir.clone();
+        let mut manifest = j.manifest.clone();
+        manifest.state = "Applying".into();
+        j.manifest.state = "Applying".into();
+        drop(j);
+        manifest.state = state.into();
+        fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            f.request.store_root.join("target.json"),
+            serde_json::to_vec(&Target {
+                home: f.request.home.clone(),
+                sqlite_home: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        f.request.action = "cleanup".into();
+        assert_eq!(execute(&f.request, &|_| {}).unwrap()["cleaned"], true);
+        assert_eq!(dir.exists(), state == "Applying");
+        assert_eq!(fs::read(&f.rollout).unwrap(), original);
+    }
+}

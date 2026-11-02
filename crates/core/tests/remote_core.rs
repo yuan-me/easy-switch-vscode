@@ -98,6 +98,100 @@ fn retained_backups_survive_rollback_recovery_and_cleanup() {
     }
 }
 
+#[test]
+fn compact_history_keeps_small_recovery_data_and_restores_exact_bytes() {
+    initialize_crypto();
+    for mode in [
+        "metadata-and-append",
+        "append",
+        "rollback",
+        "interrupted",
+        "corrupt",
+        "concurrent",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let store = temp.path().join("store");
+        let path = temp.path().join("history.jsonl");
+        let source = temp.path().join("rewrite.jsonl");
+        let body = format!("{{\"message\":\"{}\"}}\n", "x".repeat(2 * 1024 * 1024));
+        let original = format!("{{\"provider\":\"openai\"}}\n{body}");
+        let new = format!(
+            "{{\"provider\":\"{}\"}}\n{body}{{\"settings\":true}}\n",
+            if mode == "append" {
+                "openai"
+            } else {
+                "custom-provider"
+            }
+        );
+        fs::write(&path, &original).unwrap();
+        fs::write(&source, &new).unwrap();
+        let mut j = Journal::new(&store, "compact switch").unwrap();
+        j.retain_backups().unwrap();
+        j.use_delta_history();
+        j.stage_file_from_snapshot(&path, &source, &journal::hash(&path).unwrap())
+            .unwrap();
+        let change = &j.manifest.files[0];
+        let backup = change.backup.clone().unwrap();
+        let stage = change.stage.clone().unwrap();
+        assert!(fs::metadata(&backup).unwrap().len() < 8192);
+        assert!(fs::metadata(&stage).unwrap().len() < 8192);
+        let dir = j.dir.clone();
+        if mode == "rollback" {
+            assert!(j.commit_with_fault(Some(0)).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        } else if mode == "interrupted" {
+            j.manifest.state = "Applying".into();
+            fs::write(
+                dir.join("manifest.json"),
+                serde_json::to_vec(&j.manifest).unwrap(),
+            )
+            .unwrap();
+            fs::write(&path, &new).unwrap();
+            drop(j);
+            journal::restore(
+                &store,
+                dir.file_name().unwrap().to_str().unwrap(),
+                &[temp.path().to_owned()],
+            )
+            .unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            assert!(!stage.exists());
+            continue;
+        } else if mode == "corrupt" {
+            fs::write(&backup, b"corrupt encrypted delta").unwrap();
+            assert!(j.commit().is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            continue;
+        } else if mode == "concurrent" {
+            fs::write(&path, format!("{original}new message\n")).unwrap();
+            assert!(j.commit().is_err());
+            assert!(
+                fs::read_to_string(&path)
+                    .unwrap()
+                    .ends_with("new message\n")
+            );
+            continue;
+        } else {
+            j.commit().unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), new);
+        }
+        drop(j);
+        assert!(backup.exists());
+        assert!(
+            !stage.exists(),
+            "completed forward staging payload must not accumulate"
+        );
+    }
+}
+
+#[test]
+fn disk_budget_refuses_before_allocating_payloads() {
+    let temp = tempfile::tempdir().unwrap();
+    let error = journal::ensure_space(temp.path(), u64::MAX).unwrap_err();
+    assert!(error.to_string().contains("磁盘空间不足"));
+    assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+}
+
 fn settings_event(
     id: &str,
     cwd: &std::path::Path,
