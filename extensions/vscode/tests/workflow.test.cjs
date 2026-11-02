@@ -11,6 +11,39 @@ const home = '/home/test/.codex';
 const pending = [{ id: 'operation-one', description: '中断切换', state: 'Applying', fileCount: 3 }];
 const repairPlan = { fingerprint: 'a'.repeat(64), fileCount: 1, items: [{ path: '/synthetic/rollout.jsonl', line: 4, detail: '图片无法恢复，保留原件备份', missingImage: true }] };
 
+test('native sidebar separates information and providers with only one refresh and add entry', () => host({}, async ({ view }) => {
+  const manifest = require('../package.json');
+  assert.equal(manifest.contributes.viewsContainers.activitybar[0].title, 'Easy Switch');
+  assert.deepEqual(manifest.contributes.views.easySwitch.map(v => [v.id, v.name]), [
+    ['easySwitch.information', '服务器信息'], ['easySwitch.providers', '服务商']
+  ]);
+  const info = view.getInformation();
+  assert.equal(info.length, 2);
+  assert.match(info[0].label, /^SSH · /);
+  assert.equal(info[1].label, home);
+  const rows = view.getChildren();
+  assert.deepEqual(rows.map(row => row.provider?.id ?? row.command?.command), ['official', provider.id, 'easySwitch.addProvider']);
+  assert.ok(![...info, ...rows].some(row => row.command?.command === 'easySwitch.refresh' || /手动停止|检查中断|检查并修复/.test(row.label)));
+  const actions = manifest.contributes.menus['view/title'];
+  assert.equal(actions.filter(a => a.command === 'easySwitch.refresh').length, 1);
+  assert.ok(!actions.some(a => a.command === 'easySwitch.addProvider'));
+}));
+
+test('switch discovers a new interruption and offers recovery before any switch write', () => host({ pendingDuringPreflight: true, cancelConfirmation: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.switchProvider')({ provider });
+  assert.ok(events.some(e => e.inspect?.provider));
+  assert.ok(events.includes('confirm'));
+  assert.ok(events.some(e => e.detail?.includes('恢复会校验备份')));
+  assert.ok(!events.some(e => e.mutation));
+}));
+
+test('switch confirms repair when needed and does not silently switch after repair', () => host({ repairPlan, acceptRepair: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.switchProvider')({ provider });
+  assert.deepEqual(events.filter(e => e.mutation).map(e => e.mutation.action), ['repair']);
+  assert.ok(events.indexOf('confirm') < events.findIndex(e => e.mutation));
+  assert.ok(events.includes('reload'));
+}));
+
 async function host(options, check) {
   const values = new Map(), secrets = new Map(), commands = new Map(), events = [], messages = [], inputs = [];
   const state = { get: key => values.get(key), update: async (key, value) => { values.set(key, structuredClone(value)); } };
@@ -54,7 +87,7 @@ async function host(options, check) {
   const manual = require('../out/manualStop'), savedConfirm = manual.confirmManualStop;
   manual.confirmManualStop = async (title, detail) => { events.push('confirm'); events.push({ detail }); return title.startsWith('修复聊天') ? !!options.acceptRepair : !options.cancelConfirmation; };
   helper.runHelper = async (_, request) => {
-    if (request.action === 'inspect') { inspections++; events.push({ inspect: structuredClone(request) }); if (options.inspectFails || (options.failAfterFirstInspection && inspections > 1)) throw Error('会话扫描存在异常：synthetic.jsonl：会话元数据重复且无法确认继承关系'); return snapshot(); }
+    if (request.action === 'inspect') { inspections++; if (options.pendingDuringPreflight && inspections > 1) phase = 'pending'; events.push({ inspect: structuredClone(request) }); if (options.inspectFails || (options.failAfterFirstInspection && inspections > 1)) throw Error('会话扫描存在异常：synthetic.jsonl：会话元数据重复且无法确认继承关系'); return snapshot(); }
     events.push({ mutation: structuredClone(request) });
     if (options.mutationFails) { phase = 'pending'; throw Error('模拟部分提交'); }
     phase = 'ready';
@@ -76,7 +109,7 @@ async function host(options, check) {
 }
 
 test('target validation precedes manual confirmation and displays inspected directory without inventing env override', () => host({}, async ({ commands, events, view }) => {
-  assert.ok(view.getChildren().some(row => String(row.tooltip).includes('/data/sqlite')));
+  assert.ok(view.getInformation().some(row => String(row.tooltip).includes('/data/sqlite')));
   await commands.get('easySwitch.switchProvider')({ provider });
   const targetIndex = events.findIndex(e => e.inspect?.provider);
   const stopIndex = events.indexOf('confirm');
@@ -92,11 +125,11 @@ test('target validation precedes manual confirmation and displays inspected dire
 }));
 
 test('startup scan error keeps providers, target, actions and full diagnostics visible', () => host({ inspectFails: true }, async ({ options, commands, events, view, inputs }) => {
-  const rows = view.getChildren();
+  const rows = [...view.getInformation(), ...view.getChildren()];
   assert.ok(rows.some(row => row.provider?.id === provider.id));
   assert.ok(rows.some(row => row.provider?.id === 'official'));
   assert.ok(rows.some(row => row.label === home));
-  for (const command of ['showError', 'refresh', 'addProvider', 'repairHistories', 'recover']) {
+  for (const command of ['showError', 'addProvider']) {
     assert.ok(rows.some(row => row.command?.command === `easySwitch.${command}`), command);
   }
   assert.ok(!rows.some(row => row.description === '当前配置'));
@@ -111,7 +144,7 @@ test('startup scan error keeps providers, target, actions and full diagnostics v
   await commands.get('easySwitch.reload')();
   assert.ok(!events.some(e => e.mutation)); assert.ok(!events.includes('reload'));
   options.inspectFails = false; await commands.get('easySwitch.refresh')();
-  assert.ok(!view.getChildren().some(row => row.command?.command === 'easySwitch.showError'));
+  assert.ok(!view.getInformation().some(row => row.command?.command === 'easySwitch.showError'));
   assert.ok(view.getChildren().some(row => row.description === '当前配置'));
 }));
 
@@ -122,11 +155,12 @@ test('failed refresh clears stale active status but keeps current server provide
   environment.discoverTarget = async () => { throw Error('target unavailable'); };
   await commands.get('easySwitch.refresh')();
   assert.ok(!view.getChildren().some(row => row.provider));
-  assert.ok(view.getChildren().some(row => row.command?.command === 'easySwitch.refresh'));
+  assert.ok(view.getInformation().some(row => row.command?.command === 'easySwitch.showError'));
+  assert.ok(commands.has('easySwitch.refresh'));
 }));
 
 test('repair preview can be cancelled without stopping or mutating histories', () => host({ repairPlan }, async ({ commands, events, view }) => {
-  assert.ok(view.getChildren().some(row => row.command?.command === 'easySwitch.repairHistories'));
+  assert.ok(view.getInformation().some(row => row.command?.command === 'easySwitch.repairHistories'));
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.ok(events.some(e => e.detail?.includes('这不是无损修复')));
   assert.ok(events.includes('confirm'));
@@ -229,7 +263,7 @@ test('workspace folders added after refresh are checked in preflight and mutatio
 test('partial commit refreshes recovery state and blocks automatic and manual reload', () => host({ mutationFails: true }, async ({ commands, events, messages, view }) => {
   await commands.get('easySwitch.switchProvider')({ provider });
   assert.equal(events.filter(e => e.inspect).length, 3);
-  assert.ok(view.getChildren().some(row => String(row.label).includes('待恢复')));
+  assert.ok(view.getInformation().some(row => String(row.label).includes('待恢复')));
   assert.ok(!events.includes('reload'));
   assert.deepEqual(events.find(e => e.errorActions)?.errorActions, []);
   await commands.get('easySwitch.reload')();
@@ -238,11 +272,11 @@ test('partial commit refreshes recovery state and blocks automatic and manual re
   assert.ok(!events.includes('reload'));
   assert.ok(!events.includes('openCodex'));
 }));
-test('startup with interrupted operation does not activate Codex or offer a normal switch', () => host({ pending: true }, async ({ commands, events, activated, view }) => {
+test('switch with interrupted operation enters recovery without switching or activating Codex', () => host({ pending: true, cancelConfirmation: true }, async ({ commands, events, activated, view }) => {
   assert.equal(activated, 0);
-  assert.ok(view.getChildren().some(row => String(row.label).includes('待恢复')));
+  assert.ok(view.getInformation().some(row => String(row.label).includes('待恢复')));
   await commands.get('easySwitch.switchProvider')({ provider });
-  assert.ok(!events.includes('confirm'));
+  assert.ok(events.includes('confirm'));
   assert.ok(!events.some(e => e.mutation));
 }));
 for (const version of ['26.1021.22027', '26.1007.21434', '26.1002.51308', '26.51021.22027']) {

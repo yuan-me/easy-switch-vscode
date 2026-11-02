@@ -99,6 +99,23 @@ def run(args):
     add(entries, "probe", b"", 0o40700)
     for name, data in tests.items():
         add(entries, f"probe/{name}", data, 0o100755)
+    sample_count = 0
+    if args.fork_samples:
+        if args.codex:
+            raise ValueError("private fork samples and app-server integration must run separately")
+        sample_root = Path(args.fork_samples)
+        if sample_root.is_symlink() or not sample_root.is_dir():
+            raise ValueError("fork samples must be a regular directory of disposable copies")
+        add(entries, "probe/samples", b"", 0o40700)
+        for sample in sorted(sample_root.iterdir()):
+            if sample.is_symlink() or not sample.is_file() or sample.suffix != ".jsonl":
+                raise ValueError("fork samples may contain only regular JSONL copies")
+            if sample.stat().st_size > 512 * 1024 * 1024:
+                raise ValueError("fork sample exceeds the supported size")
+            add(entries, f"probe/samples/{sample.name}", sample.read_bytes(), 0o100600)
+            sample_count += 1
+        if sample_count != 7:
+            raise ValueError("private fork regression expects exactly 7 samples")
     codex = None
     bwrap = None
     if args.codex:
@@ -129,6 +146,9 @@ def run(args):
                      f"export EASY_SWITCH_TEST_CODEX_VERSION='{args.codex_version}'",
                      "/probe/codex --version"]
     test_filter = " --ignored real_appserver_search_keeps_appended_model_projection" if codex else ""
+    if args.fork_samples:
+        commands += ["export EASY_SWITCH_FORK_SAMPLES=/probe/samples"]
+        test_filter = " --ignored private_fork_preflight_and_owned_model_switch"
     for name in tests:
         commands += [f"/probe/{name} --test-threads=1 --nocapture{test_filter}", "rc=$?", f"echo TEST_RESULT {name} $rc", "[ $rc -eq 0 ] || overall=1"]
     if codex:
@@ -174,12 +194,15 @@ def run(args):
         "testSha256": {name: hashlib.sha256(data).hexdigest() for name, data in tests.items()},
         "kernelSha256": hashlib.sha256(paths[1].read_bytes()).hexdigest(),
         "remoteSshTested": False, "realAccountsUsed": False,
+        "privateForkSampleCount": sample_count,
     }
     if codex:
         report["codexSha256"] = hashlib.sha256(codex).hexdigest()
         report["bundledBwrapSha256"] = hashlib.sha256(bwrap).hexdigest() if bwrap else None
         report["expectedCodexVersion"] = args.codex_version
         report["passed"] = report["passed"] and "PASS isolated real schema/parser/reconciliation" in text and "1 passed" in text
+    if sample_count:
+        report["passed"] = report["passed"] and "7 sample copies scanned; 1 model/provider round trip passed; 6 missing settings snapshots explicitly rejected without writes" in text
     (output / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf8")
     print(json.dumps(report, indent=2))
     if not report["passed"]:
@@ -214,6 +237,7 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--codex", help="Run the isolated app-server integration test with this Linux binary")
     parser.add_argument("--codex-version", help="Exact expected codex-cli version output")
+    parser.add_argument("--fork-samples", help="Directory containing 7 private disposable JSONL copies; embedded only in the local offline guest")
     options = parser.parse_args()
     if options.self_test:
         unittest.main(argv=[__file__])

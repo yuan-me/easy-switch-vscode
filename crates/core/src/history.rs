@@ -408,7 +408,7 @@ pub fn same_paginated_thread(a: &Path, b: &Path) -> Result<bool> {
         && rollout_id(a) != rollout_id(b))
 }
 
-pub(crate) fn inherited_metadata(owner: &Value, row: &Value, ordinal: u64) -> bool {
+fn inherited_metadata(owner: &Value, row: &Value, ordinal: u64) -> bool {
     let owner = &owner["payload"];
     let row = &row["payload"];
     let Some(id) = row["id"].as_str().filter(|id| !id.is_empty()) else {
@@ -423,6 +423,64 @@ pub(crate) fn inherited_metadata(owner: &Value, row: &Value, ordinal: u64) -> bo
         && owner["subagent_history_start_ordinal"]
             .as_u64()
             .is_some_and(|end| ordinal > 0 && ordinal < end)
+}
+
+pub(crate) struct MetadataInheritance {
+    next_parent: Option<String>,
+    seen: HashSet<String>,
+    next_ordinal: u64,
+}
+impl MetadataInheritance {
+    pub(crate) fn new(owner: &Value) -> Self {
+        Self {
+            next_parent: owner["payload"]["forked_from_id"]
+                .as_str()
+                .map(str::to_owned),
+            seen: owner["payload"]["id"]
+                .as_str()
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            next_ordinal: 1,
+        }
+    }
+    pub(crate) fn accept(&mut self, owner: &Value, row: &Value, ordinal: u64) -> bool {
+        let Some(id) = row["payload"]["id"].as_str().filter(|id| !id.is_empty()) else {
+            return false;
+        };
+        if self.seen.contains(id) {
+            return false;
+        }
+        if row["payload"]["forked_from_id"]
+            .as_str()
+            .is_some_and(|parent| parent == id || self.seen.contains(parent))
+        {
+            return false;
+        }
+        let ordinary = |node: &Value| {
+            let p = &node["payload"];
+            (p["history_mode"].is_null() || p["history_mode"] == "legacy")
+                && p["history_base"].is_null()
+                && p.get("subagent_history_start_ordinal").is_none()
+                && p.get("parent_thread_id").is_none()
+                && p["id"]
+                    .as_str()
+                    .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+        };
+        // Ordinary forks copy a contiguous ancestry prefix, sometimes with new session IDs.
+        // Explicit subagent/paginated metadata must still satisfy its original boundary rules.
+        let valid = if ordinary(owner) {
+            ordinary(row) && ordinal == self.next_ordinal && self.next_parent.as_deref() == Some(id)
+        } else {
+            inherited_metadata(owner, row, ordinal)
+        };
+        if valid {
+            self.seen.insert(id.to_owned());
+            self.next_parent = row["payload"]["forked_from_id"].as_str().map(str::to_owned);
+            self.next_ordinal = ordinal + 1;
+        }
+        valid
+    }
 }
 pub fn ensure_unreferenced(settings: &Settings, deleting: &[PathBuf]) -> Result<()> {
     let deleting = deleting
@@ -754,6 +812,7 @@ pub(crate) fn stage_metadata_with_events(
             let mut ordinal = 0;
             let mut physical_line = 0;
             let mut found = false;
+            let mut inheritance = MetadataInheritance::new(&m.node);
             let mut line = vec![];
             let mut boundaries = vec![0];
             loop {
@@ -787,7 +846,7 @@ pub(crate) fn stage_metadata_with_events(
                         output.write_all(&bytes)?;
                     } else {
                         ensure!(
-                            inherited_metadata(&m.node, &row, ordinal),
+                            inheritance.accept(&m.node, &row, ordinal),
                             "会话元数据重复且无法确认继承关系，未修改"
                         );
                         output.write_all(&line)?;

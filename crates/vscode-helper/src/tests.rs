@@ -1,6 +1,7 @@
 use super::*;
 use rusqlite::{Connection, params};
 mod appserver;
+mod forks;
 mod repair;
 
 struct Fixture {

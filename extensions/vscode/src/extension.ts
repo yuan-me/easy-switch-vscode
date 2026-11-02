@@ -5,7 +5,7 @@ import * as os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { absolutePath, discoverTarget, type Target } from './environment';
 import { supportedCodexVersions } from './compatibility';
-import { confirmManualStop, stopWarning } from './manualStop';
+import { confirmManualStop } from './manualStop';
 import { runHelper, type HelperRequest, type HelperResult, type Operation } from './helper';
 import { ProviderStore, official, validateProvider, validateOfficialModel, type Provider } from './storage';
 import { registerUpdates } from './updates';
@@ -46,25 +46,35 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   getTreeItem(item: Row): vscode.TreeItem { return item; }
   getChildren(element?: Row): Row[] {
     if (element) return element.children ?? [];
+    if (!this.ready) return [new Row('服务器就绪后显示服务商')];
     const rows: Row[] = [];
+    for (const provider of [official, ...this.ready.store.list()]) {
+      const row = new Row(provider.name, provider);
+      row.description = provider.id === this.result?.activeProviderId ? '当前配置' : provider.id === 'official' ? '' : provider.model;
+      if (provider.id === this.result?.activeProviderId) row.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
+      rows.push(row);
+    }
+    const add = new Row('添加 API 服务商');
+    add.command = { command: 'easySwitch.addProvider', title: '添加 API 服务商' };
+    add.iconPath = new vscode.ThemeIcon('add');
+    rows.push(add);
+    return rows;
+  }
+  getInformation(element?: Row): Row[] {
+    if (element) return element.children ?? [];
+    const rows: Row[] = [];
+    if (this.ready) {
+      const server = new Row(`SSH · ${os.hostname()}`), directory = new Row(this.ready.target.home);
+      server.iconPath = new vscode.ThemeIcon('remote'); directory.iconPath = new vscode.ThemeIcon('folder');
+      directory.tooltip = `Codex 数据目录：${this.ready.target.home}\n数据库目录：${this.result ? this.ready.target.sqliteHome ?? this.ready.target.home : '尚未确认'}\n使用此目录的其他 Codex 窗口和 CLI 也会使用这份配置。`;
+      rows.push(server, directory);
+    }
     if (this.error) {
       const row = new Row('检查未通过 · 点击查看完整错误');
       row.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'));
       row.tooltip = this.error; row.command = { command: 'easySwitch.showError', title: '查看错误详情' }; rows.push(row);
     }
-    const action = (label: string, command: string, icon: string) => {
-      const row = new Row(label); row.command = { command: `easySwitch.${command}`, title: label };
-      row.iconPath = new vscode.ThemeIcon(icon); rows.push(row);
-    };
-    action('刷新检查', 'refresh', 'refresh');
     if (!this.ready) { if (!this.error) rows.push(new Row('正在识别服务器…')); return rows; }
-    const server = new Row(`SSH · ${os.hostname()}`), directory = new Row(this.ready.target.home);
-    server.iconPath = new vscode.ThemeIcon('remote'); directory.iconPath = new vscode.ThemeIcon('folder');
-    directory.tooltip = `Codex 数据目录：${this.ready.target.home}\n数据库：${this.result ? this.ready.target.sqliteHome ?? `${this.ready.target.home}/sqlite` : '检查未完成，尚未确认'}\n使用此目录的其他 Codex 窗口和 CLI 也会使用这份配置。`;
-    rows.push(server, directory);
-    const warning = new Row('操作前请手动停止 Codex · 未检查占用');
-    warning.iconPath = new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'));
-    warning.tooltip = stopWarning; rows.push(warning);
     if (this.result?.repairPlan) {
       const children = this.result.repairPlan.items.map(item => {
         const row = new Row(`${path.basename(item.path)} · 第 ${item.line} 行`);
@@ -74,11 +84,9 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
       });
       const plan = new Row(`待修复：${this.result.repairPlan.fileCount} 个聊天文件，${children.length} 处异常`, undefined, children);
       plan.iconPath = new vscode.ThemeIcon('warning');
+      plan.command = { command: 'easySwitch.repairHistories', title: '查看并确认修复' };
       rows.push(plan);
     }
-    action('添加 API 服务商', 'addProvider', 'add');
-    action('检查并修复聊天记录', 'repairHistories', 'tools');
-    action('检查中断操作', 'recover', 'history');
     if (this.progress) { const p = new Row(this.progress); p.iconPath = new vscode.ThemeIcon('loading~spin'); rows.push(p); }
     if (this.result && this.reloadPending && !this.operationUncertain && !this.result.operations?.some(unfinished)) {
       const reload = new Row('操作已完成，点击重载窗口');
@@ -92,13 +100,6 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
       row.command = { command: 'easySwitch.recover', title: '恢复中断操作' };
       rows.push(row);
     }
-    for (const provider of [official, ...this.ready.store.list()]) {
-      const row = new Row(provider.name, provider);
-      row.description = provider.id === this.result?.activeProviderId ? '当前配置' : provider.id === 'official' ? '' : provider.model;
-      if (provider.id === this.result?.activeProviderId) row.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
-      rows.push(row);
-    }
-    if (!this.ready.store.list().length) rows.push(new Row('点击上方 + 添加 API 服务商'));
     return rows;
   }
   private update(): void {
@@ -235,6 +236,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (vscode.workspace.getConfiguration('chatgpt').get<string>('cliExecutable')) throw new Error('当前 Codex 使用自定义 CLI，无法确认后端归属。请恢复官方内置 CLI 后重试。');
   }
   async switch(row?: Row): Promise<void> {
+    if (this.result?.operations?.some(unfinished)) { await this.recover(); return; }
     if (this.result?.repairPlan) { await this.repairHistories(); return; }
     const provider = await this.choose(row);
     if (!provider) return;
@@ -242,7 +244,6 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     this.supported(ready);
     const apiKey = provider.id === 'official' ? undefined : await ready.store.key(provider.id);
     if (provider.id !== 'official' && !apiKey) throw new Error('当前客户端没有该服务商的密钥，请编辑服务商重新输入。');
-    if (this.result?.operations?.some(unfinished)) throw new Error('存在未完成的切换，请先运行“恢复中断的切换”。');
     let officialModel = this.result?.officialModel ?? ready.store.officialModel();
     if (officialModel == null) {
       officialModel = await this.configureOfficialModel(ready);
@@ -251,8 +252,8 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     const before = await runHelper(ready.binary, { ...this.request(ready, 'inspect'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, officialModel });
     this.adoptTarget(ready, before);
     this.result = before;
+    if (before.operations?.some(unfinished)) { this.update(); await this.recover(); return; }
     if (before.repairPlan) { this.update(); await this.repairHistories(); return; }
-    if (before.operations?.some(unfinished)) throw new Error('存在未完成的切换，请先运行“恢复中断的切换”。');
     const configFingerprint = before.configFingerprint;
     if (!configFingerprint) throw new Error('切换工具没有返回配置指纹，无法安全提交。');
     officialModel = before.officialModel ?? officialModel;
@@ -301,7 +302,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     this.supported(ready);
     const snapshot = await runHelper(ready.binary, this.request(ready, 'inspect'));
     this.adoptTarget(ready, snapshot); this.result = snapshot; this.update();
-    if (snapshot.operations?.some(unfinished)) throw new Error('先恢复中断操作，再修复聊天记录。');
+    if (snapshot.operations?.some(unfinished)) { await this.recover(); return; }
     const plan = snapshot.repairPlan;
     if (!plan) { void vscode.window.showInformationMessage('没有发现需要修复的记录。'); return; }
     if (!snapshot.configFingerprint) throw new Error('缺少配置指纹，不能修复。');
@@ -340,7 +341,13 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   registerUpdates(context);
   const view = new SwitchView(context);
-  context.subscriptions.push(view, vscode.window.registerTreeDataProvider('easySwitch.providers', view));
+  context.subscriptions.push(view,
+    vscode.window.registerTreeDataProvider<Row>('easySwitch.information', {
+      onDidChangeTreeData: view.onDidChangeTreeData,
+      getTreeItem: item => view.getTreeItem(item),
+      getChildren: item => view.getInformation(item)
+    }),
+    vscode.window.registerTreeDataProvider('easySwitch.providers', view));
   const commands: Record<string, (row?: Row) => Promise<void>> = {
     addProvider: () => view.edit(undefined, true), editProvider: row => view.edit(row), removeProvider: row => view.remove(row),
     switchProvider: row => view.switch(row), refresh: () => view.refresh(), recover: () => view.recover(), reload: () => view.reload(),

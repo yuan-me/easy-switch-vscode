@@ -368,9 +368,14 @@ impl Scanner {
                         let v: Value = serde_json::from_str(line.trim_start_matches('\u{feff}'))?;
                         let p = &v["payload"];
                         if v["type"] == "session_meta" {
-                            if let Some(owner) = &metadata {
+                            if let Some((owner, inheritance)) = &mut metadata {
                                 ensure!(
-                                    crate::history::inherited_metadata(owner, &v, ordinal as u64),
+                                    crate::history::MetadataInheritance::accept(
+                                        inheritance,
+                                        owner,
+                                        &v,
+                                        ordinal as u64
+                                    ),
                                     "会话元数据重复且无法确认继承关系"
                                 );
                                 continue;
@@ -390,7 +395,8 @@ impl Scanner {
                                 related_databases: vec![],
                                 related_paths: vec![],
                             });
-                            metadata = Some(v.clone());
+                            metadata =
+                                Some((v.clone(), crate::history::MetadataInheritance::new(&v)));
                         }
                         if v["type"] == "event_msg" && p["type"] == "user_message" {
                             if let Some(item) = item.as_mut() {
@@ -585,9 +591,14 @@ pub fn patch_metadata(source: &Path, dest: &Path, key: &str, value: &str) -> Res
         if end > start {
             let mut node = crate::history::parse_record(&line, source, ordinal + 1)?;
             if node["type"] == "session_meta" {
-                if let Some(owner) = &metadata {
+                if let Some((owner, inheritance)) = &mut metadata {
                     ensure!(
-                        crate::history::inherited_metadata(owner, &node, ordinal),
+                        crate::history::MetadataInheritance::accept(
+                            inheritance,
+                            owner,
+                            &node,
+                            ordinal
+                        ),
                         "会话元数据重复且无法确认继承关系，未修改"
                     );
                     output.write_all(&line)?;
@@ -600,7 +611,10 @@ pub fn patch_metadata(source: &Path, dest: &Path, key: &str, value: &str) -> Res
                         .is_some_and(|id| !id.is_empty()),
                     "会话元数据身份缺失"
                 );
-                metadata = Some(node.clone());
+                metadata = Some((
+                    node.clone(),
+                    crate::history::MetadataInheritance::new(&node),
+                ));
                 if node["payload"][key] != value {
                     node["payload"][key] = json!(value);
                     output.write_all(&line[..start])?;

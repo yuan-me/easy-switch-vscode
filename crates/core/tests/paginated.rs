@@ -3,6 +3,8 @@ use serde_json::json;
 use std::{fs, path::PathBuf};
 use tokio_util::sync::CancellationToken;
 fn fixture() -> (tempfile::TempDir, Settings, String, PathBuf, PathBuf) {
+    #[cfg(not(windows))]
+    easy_switch_core::crypto::set_session_key([42; 32]).unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let home = tmp.path().join("home");
     let dir = home.join("sessions/2026/09/29");

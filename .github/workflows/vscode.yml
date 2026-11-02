@@ -47,6 +47,7 @@ jobs:
       - name: Run Linux portability and helper regression tests
         run: |
           cargo test -p easy-switch-core --test remote_core --locked
+          cargo test -p easy-switch-core --test forks --test paginated --locked
           cargo test -p easy-switch-helper --locked
       - name: Build static helper
         run: env "CC_${{ matrix.target }}=musl-gcc" cargo build -p easy-switch-helper --release --target ${{ matrix.target }} --locked
