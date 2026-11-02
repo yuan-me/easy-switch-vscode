@@ -266,15 +266,29 @@ fn validate_settings_snapshot(settings: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Read bounded lines from the effective history, retaining only the latest owned snapshot.
-/// The event shape is pinned to Codex 0.164.0-alpha.11.1; permissions are copied, never invented.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MissingSettings {
+    pub thread_id: String,
+    pub path: PathBuf,
+    pub source_hash: String,
+}
+
+pub(crate) struct ModelEvents {
+    pub events: std::collections::HashMap<PathBuf, Vec<u8>>,
+    pub missing: Vec<MissingSettings>,
+}
+
+/// Existing settings are copied; missing settings require explicit read-only initialization.
 pub(crate) fn prepare_model_events(
     items: &[sessions::Session],
     provider: Option<&str>,
     model: Option<&str>,
+    initialize_missing: bool,
     ct: &tokio_util::sync::CancellationToken,
-) -> Result<std::collections::HashMap<PathBuf, Vec<u8>>> {
+) -> Result<ModelEvents> {
     let mut events = std::collections::HashMap::new();
+    let mut missing = vec![];
     for item in items {
         let current = header(&item.path)?;
         ensure!(current.id == item.id, "线程索引与会话身份不一致，未修改");
@@ -327,9 +341,42 @@ pub(crate) fn prepare_model_events(
         let model = model
             .filter(|m| !m.trim().is_empty())
             .context("旧聊天存在模型历史，请明确指定目标模型后再切换")?;
-        let mut event =
-            latest.context("旧聊天缺少归属于当前线程的完整设置快照，无法安全切换模型")?;
-        validate_settings_snapshot(&event["payload"]["thread_settings"])?;
+        let mut event = match latest {
+            Some(event) => event,
+            None => {
+                ensure!(
+                    initialize_missing,
+                    "旧聊天缺少归属于当前线程的完整设置快照，无法安全切换模型：{}（{}）",
+                    item.path.display(),
+                    item.id
+                );
+                ensure!(
+                    Path::new(&item.cwd).is_absolute(),
+                    "旧聊天缺少绝对工作目录：{}",
+                    item.path.display()
+                );
+                missing.push(MissingSettings {
+                    thread_id: item.id.clone(),
+                    path: item.path.clone(),
+                    source_hash: crate::journal::hash(&item.path)?
+                        .context("旧聊天在检查期间消失")?,
+                });
+                // A new user-confirmed baseline, not reconstructed historical or ancestor permissions.
+                serde_json::json!({"type":"event_msg","payload":{
+                    "type":"thread_settings_applied","thread_id":item.id,"thread_settings":{
+                        "model":model,"model_provider_id":item.provider,
+                        "approval_policy":"on-request","approvals_reviewer":"user",
+                        "permission_profile":{"type":"managed","file_system":{"type":"restricted",
+                            "entries":[{"path":{"type":"special","value":{"kind":"root"}},"access":"read"}]},"network":"restricted"},
+                        "cwd":item.cwd,"runtime_workspace_roots":[item.cwd],
+                        "collaboration_mode":{"mode":"default","settings":{"model":model,"reasoning_effort":null,"developer_instructions":null}},
+                        "disabled_plugin_ids":[]
+                    }
+                }})
+            }
+        };
+        validate_settings_snapshot(&event["payload"]["thread_settings"])
+            .map_err(|e| anyhow::anyhow!("{e}：{}（{}）", item.path.display(), item.id))?;
         if current.paginated {
             let last = last_ordinal.context("分页历史最后一条事件缺少 ordinal，未追加设置事件")?;
             if let Some(prefix) = current_metadata
@@ -368,7 +415,7 @@ pub(crate) fn prepare_model_events(
             );
         }
     }
-    Ok(events)
+    Ok(ModelEvents { events, missing })
 }
 
 pub(crate) fn append_projection_event(path: &Path, event: &[u8]) -> Result<()> {

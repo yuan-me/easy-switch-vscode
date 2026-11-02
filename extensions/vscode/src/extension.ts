@@ -258,14 +258,17 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (!configFingerprint) throw new Error('切换工具没有返回配置指纹，无法安全提交。');
     officialModel = before.officialModel ?? officialModel;
     this.update();
-    const accepted = await confirmManualStop(`切换到“${provider.name}”并重载 VS Code？`, `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n切换会迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。`, '切换并重载');
+    const settings = before.settingsPlan;
+    if (settings && ready.codex.packageJSON.version !== '26.1021.22027') throw new Error('旧聊天设置初始化目前已验证官方 Codex 26.1021.22027，请在服务器端使用此版本后重试。聊天未修改。');
+    const settingsDetail = settings ? `\n\n发现 ${settings.fileCount} 个旧聊天缺少自身的设置快照。本次会加密备份原件，并为这些聊天建立新设置：只读文件、网络受限、需要时向你申请权限，协作模式为默认。旧审批、协作模式、推理偏好和插件禁用列表无法可靠还原，将使用新设置的默认值；不会复制父聊天的权限。消息正文、线程关系和归档状态保留，已有有效快照的聊天保留原设置。切换后如需写文件，请在官方 Codex 中调整权限。\n\n待初始化的文件：\n${settings.items.slice(0, 10).map(i => i.path).join('\n')}${settings.fileCount > 10 ? `\n另有 ${settings.fileCount - 10} 个文件。` : ''}` : '';
+    const accepted = await confirmManualStop(`切换到“${provider.name}”并重载 VS Code？`, `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n切换会迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。${settingsDetail}`, settings ? '初始化旧聊天设置并切换' : '切换并重载');
     if (!accepted) return;
     const journalKey = await ready.store.journalKey();
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Easy Switch', cancellable: false }, async progress => {
       this.progress = '正在备份并切换'; this.update(); progress.report({ message: this.progress });
 
       this.operationUncertain = true;
-      const result = await runHelper(ready.binary, { ...this.request(ready, 'switch'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, journalKey, expectedConfigFingerprint: configFingerprint, officialModel }, event => {
+      const result = await runHelper(ready.binary, { ...this.request(ready, 'switch'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, journalKey, expectedConfigFingerprint: configFingerprint, officialModel, settingsFingerprint: settings?.fingerprint }, event => {
         this.progress = `${event.stage}：${event.detail}`; this.update(); progress.report({ message: this.progress });
       });
       if (!result.committed) throw new Error('切换结果尚未确认。请刷新并检查是否有待恢复的操作。');

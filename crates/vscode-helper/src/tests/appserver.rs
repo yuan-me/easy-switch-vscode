@@ -163,6 +163,16 @@ impl Server {
 #[test]
 #[ignore = "requires EASY_SWITCH_TEST_CODEX; isolated real app-server schema and search reconciliation"]
 fn real_appserver_search_keeps_appended_model_projection() -> Result<()> {
+    appserver_projection(false)
+}
+
+#[test]
+#[ignore = "requires EASY_SWITCH_TEST_CODEX; offline missing-settings initialization proof"]
+fn real_appserver_accepts_initialized_read_only_settings() -> Result<()> {
+    appserver_projection(true)
+}
+
+fn appserver_projection(initialize_missing: bool) -> Result<()> {
     #[cfg(not(windows))]
     easy_switch_core::crypto::set_session_key([73; 32])?;
     let executable = PathBuf::from(
@@ -280,7 +290,11 @@ fn real_appserver_search_keeps_appended_model_projection() -> Result<()> {
         "cwd":root.join("project"),"approval_policy":"on-request","sandbox_policy":{"type":"read-only"},"model":"official-model"
     }});
     let user = json!({"timestamp":"2026-10-29T00:00:03Z","type":"event_msg","payload":{"type":"user_message","message":TITLE}});
-    let body = format!("{snapshot}\n{context}\n{user}\n");
+    let body = if initialize_missing {
+        format!("{context}\n{user}\n")
+    } else {
+        format!("{snapshot}\n{context}\n{user}\n")
+    };
     fs::write(&rollout, format!("{meta}\n{body}"))?;
     let mut names = vec![];
     let mut values = vec![];
@@ -340,6 +354,7 @@ fn real_appserver_search_keeps_appended_model_projection() -> Result<()> {
         operation_id: None,
         expected_config_fingerprint: None,
         repair_fingerprint: None,
+        settings_fingerprint: None,
         project_dirs: vec![root.join("project")],
     };
     for (id, model, expected_provider) in [
@@ -357,6 +372,16 @@ fn real_appserver_search_keeps_appended_model_projection() -> Result<()> {
         request.official_model = (id == "official").then(|| model.into());
         request.expected_config_fingerprint =
             Some(journal::hash_bytes(read_config(&home)?.0.as_bytes()));
+        let preview = inspect(&request)?;
+        request.settings_fingerprint = preview["settingsPlan"]["fingerprint"]
+            .as_str()
+            .map(str::to_owned);
+        if initialize_missing && id == "a" {
+            ensure!(
+                preview["settingsPlan"]["fileCount"] == 1,
+                "missing settings not planned"
+            );
+        }
         switch(&request, &|_| {}, &|| Ok(()))?;
         let db = Connection::open(&database)?;
         db.execute("UPDATE threads SET model='deliberately-stale-model',model_provider='deliberately-stale-provider' WHERE id=?1", [THREAD])?;
@@ -378,6 +403,14 @@ fn real_appserver_search_keeps_appended_model_projection() -> Result<()> {
                 "PASS resume {id}: original thread, provider={expected_provider}, model={model}"
             ),
         )?;
+        if initialize_missing {
+            ensure!(
+                resumed["approvalPolicy"] == "on-request"
+                    && resumed["sandbox"]["type"] == "readOnly"
+                    && resumed["sandbox"]["networkAccess"] == false,
+                "initialized permissions were not read-only/on-request: {resumed}"
+            );
+        }
         server.stop()?;
         let db = Connection::open(&database)?;
         let projection: (String, String) = db.query_row(

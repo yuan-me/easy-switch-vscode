@@ -720,6 +720,18 @@ pub fn stage_provider_with_model(
     ct: &CancellationToken,
     progress: &impl Fn(crate::Progress),
 ) -> Result<()> {
+    stage_provider_with_model_settings(j, settings, items, provider, model, false, ct, progress)
+}
+pub fn stage_provider_with_model_settings(
+    j: &mut Journal,
+    settings: &Settings,
+    items: &[Session],
+    provider: &str,
+    model: Option<&str>,
+    initialize_missing: bool,
+    ct: &CancellationToken,
+    progress: &impl Fn(crate::Progress),
+) -> Result<()> {
     ensure!(
         model.is_none_or(|m| !m.trim().is_empty()),
         "目标模型不能为空"
@@ -730,13 +742,21 @@ pub fn stage_provider_with_model(
         items,
         "provider",
         Some(provider),
-        Some(model),
+        Some((model, initialize_missing)),
         ct,
         progress,
     )
 }
 pub fn validate_provider_model_history(items: &[Session], model: Option<&str>) -> Result<()> {
-    crate::history::prepare_model_events(items, None, model, &CancellationToken::new()).map(|_| ())
+    crate::history::prepare_model_events(items, None, model, false, &CancellationToken::new())
+        .map(|_| ())
+}
+pub fn missing_model_settings(
+    items: &[Session],
+    model: Option<&str>,
+) -> Result<Vec<crate::history::MissingSettings>> {
+    crate::history::prepare_model_events(items, None, model, true, &CancellationToken::new())
+        .map(|plan| plan.missing)
 }
 fn stage_changes_inner(
     j: &mut Journal,
@@ -744,7 +764,7 @@ fn stage_changes_inner(
     items: &[Session],
     action: &str,
     value: Option<&str>,
-    model: Option<Option<&str>>,
+    model: Option<(Option<&str>, bool)>,
     ct: &CancellationToken,
     progress: &impl Fn(crate::Progress),
 ) -> Result<()> {
@@ -756,16 +776,19 @@ fn stage_changes_inner(
         ),
         "不支持的会话操作"
     );
-    let projection_events = if let Some(model) = model {
+    let projection_events = if let Some((model, initialize_missing)) = model {
         crate::history::prepare_model_events(
             items,
             Some(value.context("缺少目标服务商")?),
             model,
+            initialize_missing,
             ct,
         )?
+        .events
     } else {
         HashMap::new()
     };
+    let model = model.map(|(model, _)| model);
     let mut destinations = HashMap::new();
     let mut expanded = vec![];
     for item in items {

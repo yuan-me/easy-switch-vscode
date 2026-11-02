@@ -35,6 +35,7 @@ pub struct Request {
     pub operation_id: Option<String>,
     pub expected_config_fingerprint: Option<String>,
     pub repair_fingerprint: Option<String>,
+    pub settings_fingerprint: Option<String>,
     #[serde(default)]
     pub project_dirs: Vec<PathBuf>,
 }
@@ -613,6 +614,27 @@ pub fn execute(req: &Request, progress: &impl Fn(Progress)) -> Result<Value> {
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsPlan {
+    fingerprint: String,
+    file_count: usize,
+    items: Vec<history::MissingSettings>,
+}
+
+fn settings_plan(items: &[sessions::Session], model: Option<&str>) -> Result<Option<SettingsPlan>> {
+    let mut missing = sessions::missing_model_settings(items, model)?;
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    missing.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(Some(SettingsPlan {
+        fingerprint: journal::hash_bytes(&serde_json::to_vec(&missing)?),
+        file_count: missing.len(),
+        items: missing,
+    }))
+}
+
 fn inspect(req: &Request) -> Result<Value> {
     let operations: Vec<_> = journal::list(&req.store_root.join("operations"), false)?
         .into_iter()
@@ -650,9 +672,10 @@ fn inspect(req: &Request) -> Result<Value> {
         "会话扫描存在异常：{}",
         scan.warnings.join("；")
     );
+    let mut settings = None;
     if req.provider.is_some() {
         check_current_index(req, &scan.sessions)?;
-        sessions::validate_provider_model_history(
+        settings = settings_plan(
             &scan.sessions,
             planned
                 .as_ref()
@@ -665,12 +688,14 @@ fn inspect(req: &Request) -> Result<Value> {
             scan.sessions.iter().map(|s| PathBuf::from(&s.cwd)),
         )?;
     }
-    Ok(
-        json!({"protocolVersion":PROTOCOL_VERSION,"home":req.home,"sqliteHome":req.sqlite_home,
+    let mut result = json!({"protocolVersion":PROTOCOL_VERSION,"home":req.home,"sqliteHome":req.sqlite_home,
         "activeProviderId":active_provider(&doc,&state),"operations":operations,
         "sessionCount":scan.sessions.len(),"officialModel":official_model(&doc,&planned_state),
-        "configFingerprint":journal::hash_bytes(text.as_bytes())}),
-    )
+        "configFingerprint":journal::hash_bytes(text.as_bytes())});
+    if let Some(plan) = settings {
+        result["settingsPlan"] = serde_json::to_value(plan)?;
+    }
+    Ok(result)
 }
 
 fn switch(
@@ -714,6 +739,15 @@ fn switch(
         scan.warnings.join("；")
     );
     check_current_index(req, &scan.sessions)?;
+    let model = next
+        .get("model")
+        .and_then(Item::as_str)
+        .or(state.official_model.as_deref());
+    let plan = settings_plan(&scan.sessions, model)?;
+    ensure!(
+        req.settings_fingerprint.as_deref() == plan.as_ref().map(|p| p.fingerprint.as_str()),
+        "旧聊天设置初始化尚未确认或检查后记录已变化，请重新点击服务商并确认；未修改聊天"
+    );
     check_projects(
         &req.home,
         req.project_dirs
@@ -727,19 +761,43 @@ fn switch(
         &req.home.join("config.toml"),
         Some(next.to_string().as_bytes()),
     )?;
-    sessions::stage_provider_with_model(
+    sessions::stage_provider_with_model_settings(
         &mut j,
         &settings,
         &scan.sessions,
         next.get("model_provider")
             .and_then(Item::as_str)
             .context("缺少目标 provider")?,
-        next.get("model")
-            .and_then(Item::as_str)
-            .or(state.official_model.as_deref()),
+        model,
+        plan.is_some(),
         &ct,
         progress,
     )?;
+    if let Some(plan) = &plan {
+        ensure!(
+            settings_plan(&scan.sessions, model)?
+                .as_ref()
+                .map(|p| p.fingerprint.as_str())
+                == Some(plan.fingerprint.as_str()),
+            "暂存期间旧聊天初始化范围发生变化，已停止提交，请重新预检"
+        );
+        for item in &plan.items {
+            ensure!(
+                journal::hash(&item.path)?.as_deref() == Some(item.source_hash.as_str()),
+                "确认后旧聊天发生变化，已停止提交：{}",
+                item.path.display()
+            );
+            ensure!(
+                j.manifest
+                    .files
+                    .iter()
+                    .any(|change| change.path == item.path
+                        && change.before_hash.as_deref() == Some(item.source_hash.as_str())),
+                "旧聊天备份与确认内容不一致，已停止提交：{}",
+                item.path.display()
+            );
+        }
+    }
     j.stage(
         &req.store_root.join("switch-state.json"),
         Some(&serde_json::to_vec(&state)?),
@@ -765,6 +823,7 @@ fn switch(
                 "提交后线程身份校验失败"
             );
         }
+        sessions::validate_provider_model_history(&verified.sessions, model)?;
         Ok(())
     })?;
     Ok(

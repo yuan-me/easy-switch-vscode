@@ -41,3 +41,10 @@ test('large repair reports retain all paths and redact request secrets', () => f
 test('malformed repair reports are rejected', () => fixture(async () => {
   await assert.rejects(runHelper(process.execPath, { ...request, operationId: 'bad-report' }), /无法识别/);
 }));
+
+test('settings initialization previews validate counts and redact secrets', () => fixture(async () => {
+  const result = await runHelper(process.execPath, { ...request, operationId: 'settings-report' });
+  assert.equal(result.settingsPlan.fileCount, 1);
+  assert.ok(!JSON.stringify(result).includes(request.apiKey));
+  await assert.rejects(runHelper(process.execPath, { ...request, operationId: 'bad-settings' }), /无法识别/);
+}));

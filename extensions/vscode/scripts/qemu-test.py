@@ -145,7 +145,7 @@ def run(args):
                      "export EASY_SWITCH_TEST_CODEX=/probe/codex EASY_SWITCH_TEST_ARTIFACTS=/probe/artifacts",
                      f"export EASY_SWITCH_TEST_CODEX_VERSION='{args.codex_version}'",
                      "/probe/codex --version"]
-    test_filter = " --ignored real_appserver_search_keeps_appended_model_projection" if codex else ""
+    test_filter = " --ignored real_appserver_" if codex else ""
     if args.fork_samples:
         commands += ["export EASY_SWITCH_FORK_SAMPLES=/probe/samples"]
         test_filter = " --ignored private_fork_preflight_and_owned_model_switch"
@@ -200,9 +200,9 @@ def run(args):
         report["codexSha256"] = hashlib.sha256(codex).hexdigest()
         report["bundledBwrapSha256"] = hashlib.sha256(bwrap).hexdigest() if bwrap else None
         report["expectedCodexVersion"] = args.codex_version
-        report["passed"] = report["passed"] and "PASS isolated real schema/parser/reconciliation" in text and "1 passed" in text
+        report["passed"] = report["passed"] and "PASS isolated real schema/parser/reconciliation" in text and "2 passed" in text
     if sample_count:
-        report["passed"] = report["passed"] and "7 sample copies scanned; 1 model/provider round trip passed; 6 missing settings snapshots explicitly rejected without writes" in text
+        report["passed"] = report["passed"] and "7 sample copies scanned; 7 model/provider round trips passed; 6 missing settings snapshots explicitly initialized" in text
     (output / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf8")
     print(json.dumps(report, indent=2))
     if not report["passed"]:

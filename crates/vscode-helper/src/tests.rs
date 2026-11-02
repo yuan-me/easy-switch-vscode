@@ -3,6 +3,7 @@ use rusqlite::{Connection, params};
 mod appserver;
 mod forks;
 mod repair;
+mod settings;
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -59,6 +60,7 @@ impl Fixture {
             operation_id: None,
             expected_config_fingerprint: None,
             repair_fingerprint: None,
+            settings_fingerprint: None,
             project_dirs: vec![project],
         };
         Self {
@@ -282,7 +284,7 @@ fn incomplete_active_index_is_rejected_before_switching() {
 }
 
 #[test]
-fn model_history_without_owned_settings_is_rejected_in_preflight() {
+fn model_history_without_owned_settings_gets_a_read_only_preflight_plan() {
     let mut f = Fixture::new();
     f.select("a", "model-a");
     let meta = fs::read_to_string(&f.rollout)
@@ -293,7 +295,7 @@ fn model_history_without_owned_settings_is_rejected_in_preflight() {
         .to_owned();
     let original = format!("{meta}\n{}", f.body.split_once('\n').unwrap().1);
     fs::write(&f.rollout, &original).unwrap();
-    assert!(inspect(&f.request).is_err());
+    assert_eq!(inspect(&f.request).unwrap()["settingsPlan"]["fileCount"], 1);
     assert_eq!(fs::read_to_string(&f.rollout).unwrap(), original);
     assert!(!f.request.home.join(OWNER_FILE).exists());
 }

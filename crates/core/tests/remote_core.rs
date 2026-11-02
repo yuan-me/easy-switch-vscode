@@ -454,6 +454,11 @@ fn model_history_without_owned_complete_snapshot_or_target_model_is_rejected() {
 
 #[test]
 fn paginated_model_event_keeps_rebased_checkpoint_before_new_event() {
+    paginated_model_projection(false);
+    paginated_model_projection(true);
+}
+
+fn paginated_model_projection(initialize_missing: bool) {
     initialize_crypto();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
@@ -465,6 +470,9 @@ fn paginated_model_event_keeps_rebased_checkpoint_before_new_event() {
     let current = folder.join(format!("rollout-{id}_{revision}.jsonl"));
     let mut snapshot = settings_event(&id, &home, "old-model", "openai");
     snapshot["ordinal"] = 1.into();
+    if initialize_missing {
+        snapshot = json!({"ordinal":1,"type":"event_msg","payload":{"type":"user_message","message":"legacy without settings"}});
+    }
     let context = json!({"ordinal":2,"type":"turn_context","payload":{"model":"old-model"}});
     let base_meta = json!({"ordinal":0,"type":"session_meta","payload":{"id":id,"session_id":id,"history_mode":"paginated","cwd":home,"model_provider":"openai"}});
     fs::write(&base, format!("{base_meta}\n{snapshot}\n{context}\n")).unwrap();
@@ -508,15 +516,22 @@ fn paginated_model_event_keeps_rebased_checkpoint_before_new_event() {
     assert!(scan.warnings.is_empty(), "{:?}", scan.warnings);
     assert_eq!(scan.sessions.len(), 1);
     assert_eq!(scan.sessions[0].path, current);
+    assert_eq!(
+        sessions::missing_model_settings(&scan.sessions, Some("new-model"))
+            .unwrap()
+            .len(),
+        usize::from(initialize_missing)
+    );
     let mut transaction =
         Journal::new(&temp.path().join("store"), "paginated model projection").unwrap();
     let provider = "api_provider_with_a_longer_identifier_than_openai";
-    sessions::stage_provider_with_model(
+    sessions::stage_provider_with_model_settings(
         &mut transaction,
         &settings,
         &scan.sessions,
         provider,
         Some("new-model"),
+        initialize_missing,
         &CancellationToken::new(),
         &|_| {},
     )

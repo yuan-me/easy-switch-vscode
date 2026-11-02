@@ -12,6 +12,9 @@ process.stdin.on('data', value => {
   } else if (request.operationId === 'repair-report' || request.operationId === 'bad-report') {
     const items = request.operationId === 'bad-report' ? [null] : Array.from({ length: 500 }, (_, i) => ({ path: `/synthetic/sessions/${i}-${request.apiKey}.jsonl`, line: i+1, missingImage: false, detail: `修复说明 ${request.journalKey} ${'x'.repeat(150)}` }));
     process.stdout.write(JSON.stringify({ type: 'result', protocolVersion: 1, activeProviderId: null, repairPlan: { fingerprint: 'a'.repeat(64), fileCount: 500, items } }) + '\n');
+  } else if (request.operationId === 'settings-report' || request.operationId === 'bad-settings') {
+    const items = [{ threadId: 'test-thread', path: '/synthetic/' + request.apiKey, sourceHash: 'c'.repeat(64) }];
+    process.stdout.write(JSON.stringify({ type: 'result', protocolVersion: 1, activeProviderId: null, settingsPlan: { fingerprint: 'b'.repeat(64), fileCount: request.operationId === 'bad-settings' ? 2 : 1, items } }) + '\n');
   } else if (request.action === 'switch') {
     process.stdout.write(JSON.stringify({ type: 'error', message: `failed ${request.apiKey} ${request.journalKey}` }) + '\n');
   } else {

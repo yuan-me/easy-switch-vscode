@@ -10,6 +10,29 @@ const provider = { id: 'esv_' + 'a'.repeat(32), name: '服务商 A', baseUrl: 'h
 const home = '/home/test/.codex';
 const pending = [{ id: 'operation-one', description: '中断切换', state: 'Applying', fileCount: 3 }];
 const repairPlan = { fingerprint: 'a'.repeat(64), fileCount: 1, items: [{ path: '/synthetic/rollout.jsonl', line: 4, detail: '图片无法恢复，保留原件备份', missingImage: true }] };
+const settingsPlan = { fingerprint: 'b'.repeat(64), fileCount: 139, items: Array.from({ length: 139 }, (_, n) => ({ threadId: `thread-${n}`, path: `/synthetic/${n}.jsonl`, sourceHash: 'c'.repeat(64) })) };
+
+test('missing settings are previewed and cancellation cannot initialize or switch', () => host({ settingsPlan, cancelConfirmation: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.switchProvider')({ provider });
+  assert.ok(events.some(e => e.detail?.includes('139 个旧聊天') && e.detail.includes('只读文件、网络受限') && e.detail.includes('不会复制父聊天')));
+  assert.ok(!events.some(e => e.mutation));
+}));
+
+test('confirmed initialization passes the exact inspected fingerprint with the switch', () => host({ settingsPlan }, async ({ commands, events }) => {
+  await commands.get('easySwitch.switchProvider')({ provider });
+  const writes = events.filter(e => e.mutation);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].mutation.action, 'switch');
+  assert.equal(writes[0].mutation.settingsFingerprint, settingsPlan.fingerprint);
+  assert.ok(events.indexOf('confirm') < events.indexOf(writes[0]));
+}));
+
+test('initialization is blocked on Codex versions without this feature validation', () => host({ settingsPlan, version: '26.1007.21434' }, async ({ commands, events, messages }) => {
+  await commands.get('easySwitch.switchProvider')({ provider });
+  assert.ok(messages.some(m => m.includes('初始化目前已验证')));
+  assert.ok(!events.includes('confirm'));
+  assert.ok(!events.some(e => e.mutation));
+}));
 
 test('native sidebar separates information and providers with only one refresh and add entry', () => host({}, async ({ view }) => {
   const manifest = require('../package.json');
@@ -53,7 +76,7 @@ async function host(options, check) {
   await store.journalKey();
   let repaired = false;
   let view, phase = options.pending ? 'pending' : 'ready', activated = 0, inspections = 0;
-  const snapshot = () => ({ type: 'result', protocolVersion: 1, home, sqliteHome: options.removeSqliteConfig && inspections > 1 ? options.envSqlite ?? null : '/data/sqlite', activeProviderId: 'official', officialModel: options.officialModel === undefined ? 'official-model' : options.officialModel, configFingerprint: phase === 'pending' ? null : 'fingerprint', sessionCount: phase === 'pending' ? null : 2, operations: phase === 'pending' ? pending : [], repairPlan: repaired ? undefined : options.repairPlan });
+  const snapshot = () => ({ settingsPlan: options.settingsPlan, type: 'result', protocolVersion: 1, home, sqliteHome: options.removeSqliteConfig && inspections > 1 ? options.envSqlite ?? null : '/data/sqlite', activeProviderId: 'official', officialModel: options.officialModel === undefined ? 'official-model' : options.officialModel, configFingerprint: phase === 'pending' ? null : 'fingerprint', sessionCount: phase === 'pending' ? null : 2, operations: phase === 'pending' ? pending : [], repairPlan: repaired ? undefined : options.repairPlan });
   const codex = { extensionKind: 2, extensionPath: '/extensions/openai.chatgpt', packageJSON: { version: options.version ?? '26.1021.22027' }, activate: async () => { activated++; } };
   class Disposable { dispose() {} }
   const vscode = {

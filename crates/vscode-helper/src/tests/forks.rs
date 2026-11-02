@@ -57,42 +57,36 @@ fn private_fork_preflight_and_owned_model_switch() {
         assert_eq!(inspect(&status).unwrap()["sessionCount"], 1);
         assert_eq!(fs::read_to_string(&f.rollout).unwrap(), raw);
         f.select("a", "test-api-model");
-        match inspect(&f.request) {
-            Ok(_) => {
-                f.run().unwrap();
-                let after = fs::read_to_string(&f.rollout).unwrap();
-                assert!(
-                    after
-                        .split_once('\n')
-                        .unwrap()
-                        .1
-                        .starts_with(raw.split_once('\n').unwrap().1)
-                );
-                let last: Value = serde_json::from_str(after.lines().last().unwrap()).unwrap();
-                assert_eq!(last["payload"]["thread_id"], id);
-                assert_eq!(
-                    last["payload"]["thread_settings"]["model"],
-                    "test-api-model"
-                );
-                f.select("official", "");
-                f.run().unwrap();
-                switched += 1;
-            }
-            Err(e) => {
-                assert!(
-                    e.to_string()
-                        .contains("旧聊天缺少归属于当前线程的完整设置快照"),
-                    "{e}"
-                );
-                assert_eq!(fs::read_to_string(&f.rollout).unwrap(), raw);
-                missing_settings += 1;
-            }
+        let preview = inspect(&f.request).unwrap();
+        if let Some(fingerprint) = preview["settingsPlan"]["fingerprint"].as_str() {
+            assert_eq!(fs::read_to_string(&f.rollout).unwrap(), raw);
+            f.request.settings_fingerprint = Some(fingerprint.into());
+            missing_settings += 1;
         }
+        f.run().unwrap();
+        let after = fs::read_to_string(&f.rollout).unwrap();
+        assert!(
+            after
+                .split_once('\n')
+                .unwrap()
+                .1
+                .starts_with(raw.split_once('\n').unwrap().1)
+        );
+        let last: Value = serde_json::from_str(after.lines().last().unwrap()).unwrap();
+        assert_eq!(last["payload"]["thread_id"], id);
+        assert_eq!(
+            last["payload"]["thread_settings"]["model"],
+            "test-api-model"
+        );
+        f.request.settings_fingerprint = None;
+        f.select("official", "");
+        f.run().unwrap();
+        switched += 1;
         assert_eq!(journal::hash(&path).unwrap(), hash);
     }
-    assert_eq!((switched, missing_settings), (1, 6));
+    assert_eq!((switched, missing_settings), (7, 6));
     println!(
-        "7 sample copies scanned; 1 model/provider round trip passed; 6 missing settings snapshots explicitly rejected without writes"
+        "7 sample copies scanned; 7 model/provider round trips passed; 6 missing settings snapshots explicitly initialized"
     );
 }
 
