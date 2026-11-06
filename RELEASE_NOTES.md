@@ -1,4 +1,4 @@
-# Easy Switch 0.1.15
+# Easy Switch 0.2.0
 
 - 新增服务商 Fast 开关。启用并切换后，可在 Codex 中选择 Standard 或 Fast，实际速度和费用取决于服务商。
 - 当前服务商的 Fast 配置生效后，侧栏用绿色显示“Fast 已启用”；尚未应用的设置显示“Fast 待启用”。

@@ -8,7 +8,7 @@
 
 1. 使用 VS Code 的 Remote-SSH 连接 Linux 服务器，并打开服务器上的项目。
 2. 在扩展页面确认官方 Codex（`openai.chatgpt`）已安装在 “SSH: 你的服务器”，且能正常打开。
-3. 在这个远程窗口运行命令 “Extensions: Install from VSIX...”，选择 `easy-switch-remote-0.1.15.vsix`。安装后确认 Easy Switch 也位于 “SSH: 你的服务器” 中。
+3. 在这个远程窗口运行命令 “Extensions: Install from VSIX...”，选择 `easy-switch-remote-0.2.0.vsix`。安装后确认 Easy Switch 也位于 “SSH: 你的服务器” 中。
 4. 打开活动栏中的 Easy Switch，核对目标服务器和 Codex 数据目录。不要在目录识别错误时继续操作。
 
 扩展包包含 Linux x64 和 arm64 工具；服务器无需安装 Rust、Node 构建工具或桌面版 Easy Switch。支持 Linux Remote-SSH，以及官方 Codex `26.1021.22027`、`26.1007.21434`、`26.1002.51308`、`26.51021.22027`。检查以服务器实际安装的版本为准，其他版本会停止切换。各版本的测试范围见 [兼容性说明](COMPATIBILITY.md)。
@@ -41,7 +41,7 @@
 
 ### Fast（0.1.14 起）
 
-添加或编辑 API 服务商时选择“启用 Fast”，保存后执行“切换并重载”。随后在 Codex 的速度选项中选择 Standard 或 Fast；启用选项不会强制所有请求使用 Fast。旧服务商默认关闭。0.1.15 起，切换后当前服务商显示绿色“Fast 已启用”；仅保存尚未应用时显示“Fast 待启用”。这一状态表示 Fast 支持已配置，具体聊天仍可选择 Standard 或 Fast。Fast 请求携带 `service_tier = "priority"`，实际速度、支持情况和费用由服务商决定。
+添加或编辑 API 服务商时选择“启用 Fast”，保存后执行“切换并重载”。随后在 Codex 的速度选项中选择 Standard 或 Fast；启用选项不会强制所有请求使用 Fast。旧服务商默认关闭。0.2.0 起，切换后当前服务商显示绿色“Fast 已启用”；仅保存尚未应用时显示“Fast 待启用”。这一状态表示 Fast 支持已配置，具体聊天仍可选择 Standard 或 Fast。Fast 请求携带 `service_tier = "priority"`，实际速度、支持情况和费用由服务商决定。
 
 Fast 启用前会检查界面模块是否兼容。启用时会在官方扩展的 `webview/assets/.easy-switch-fast/` 保存原件，再修改对应模块；补丁按当前配置判断，仅对启用 Fast 的 Easy Switch API 服务商开放，保留 Codex 的功能限制。官方扩展升级或文件被其他工具修改后会停止应用补丁，不猜测兼容性。
 
