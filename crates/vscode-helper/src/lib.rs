@@ -18,6 +18,7 @@ const OFFICIAL_KEYS: &[&str] = &[
     "model_context_window",
     "model_auto_compact_token_limit",
     "model_catalog_json",
+    "service_tier",
 ];
 
 #[derive(Clone, Deserialize)]
@@ -50,6 +51,8 @@ pub struct Provider {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub native_fast: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -515,6 +518,9 @@ fn build_config(req: &Request, mut doc: DocumentMut, state: &mut State) -> Resul
             .and_then(Item::as_value)
             .map(|v| v.decor().clone());
         doc["model"] = value(provider.model.trim());
+        if provider.native_fast {
+            doc["model_catalog_json"] = value(req.store_root.join("fast-models.json").to_string_lossy().as_ref());
+        }
         if let Some(decor) = model_decor {
             *doc["model"].as_value_mut().unwrap().decor_mut() = decor;
         }
@@ -695,6 +701,8 @@ fn inspect(req: &Request) -> Result<Value> {
     }
     let mut result = json!({"protocolVersion":PROTOCOL_VERSION,"home":req.home,"sqliteHome":req.sqlite_home,
         "activeProviderId":active_provider(&doc,&state),"operations":operations,
+        "nativeFastEnabled":doc.get("model_provider").and_then(Item::as_str)==Some(PROVIDER)
+            && doc.get("model_catalog_json").and_then(Item::as_str)==req.store_root.join("fast-models.json").to_str(),
         "sessionCount":scan.sessions.len(),"officialModel":official_model(&doc,&planned_state),
         "configFingerprint":journal::hash_bytes(text.as_bytes())});
     if let Some(plan) = settings {
@@ -767,6 +775,25 @@ fn switch(
         &req.home.join("config.toml"),
         Some(next.to_string().as_bytes()),
     )?;
+    if let Some(provider) = req.provider.as_ref().filter(|p| p.id != "official" && p.native_fast) {
+        let cache = req.home.join("models_cache.json");
+        let mut templates = Vec::new();
+        let official = state.official_config.as_deref().unwrap_or("").parse::<DocumentMut>()?;
+        let original = official.get("model_catalog_json").and_then(Item::as_str).map(|p| req.home.join(p));
+        for path in original.iter().chain(std::iter::once(&cache)) {
+            sessions::no_links(path)?;
+            if !path.exists() { continue; }
+            ensure!(fs::metadata(path)?.len() <= 64 * 1024 * 1024, "本地模型目录过大");
+            let data: Value = serde_json::from_slice(&fs::read(path)?).context("本地模型目录 JSON 无效")?;
+            templates.extend(data["models"].as_array().context("本地模型目录缺少 models")?.iter().cloned());
+        }
+        let mut catalog = easy_switch_core::catalog::model_document(&[provider.model.trim().to_owned()], &templates);
+        let model = &mut catalog["models"][0];
+        model["service_tiers"] = json!([{"id":"priority","name":"Fast","description":"优先处理（以服务商支持为准）"}]);
+        model["additional_speed_tiers"] = json!(["fast"]);
+        model["default_service_tier"] = Value::Null;
+        j.stage(&req.store_root.join("fast-models.json"), Some(&serde_json::to_vec(&catalog)?))?;
+    }
     sessions::stage_provider_with_model_settings(
         &mut j,
         &settings,
@@ -833,7 +860,8 @@ fn switch(
         Ok(())
     })?;
     Ok(
-        json!({"protocolVersion":PROTOCOL_VERSION,"committed":true,"activeProviderId":state.active_provider_id,"sessionCount":scan.sessions.len()}),
+        json!({"protocolVersion":PROTOCOL_VERSION,"committed":true,"activeProviderId":state.active_provider_id,"sessionCount":scan.sessions.len(),
+            "nativeFastEnabled":req.provider.as_ref().is_some_and(|p| p.id != "official" && p.native_fast)}),
     )
 }
 

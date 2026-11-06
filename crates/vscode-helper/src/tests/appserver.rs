@@ -67,13 +67,13 @@ impl Drop for OwnedChild {
     }
 }
 
-struct Server {
+pub(super) struct Server {
     child: OwnedChild,
     input: Option<ChildStdin>,
     responses: Receiver<String>,
 }
 impl Server {
-    fn start(executable: &Path, root: &Path, endpoint: &str, evidence: &Path) -> Result<Self> {
+    pub(super) fn start(executable: &Path, root: &Path, endpoint: &str, evidence: &Path) -> Result<Self> {
         let stderr = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -123,9 +123,9 @@ impl Server {
         input.flush()?;
         Ok(())
     }
-    fn rpc(&mut self, id: u64, method: &str, params: Value) -> Result<Value> {
+    pub(super) fn rpc(&mut self, id: u64, method: &str, params: Value) -> Result<Value> {
         ensure!(
-            matches!(method, "initialize" | "thread/list" | "thread/resume"),
+            matches!(method, "initialize" | "thread/list" | "thread/resume" | "model/list" | "config/read"),
             "test must not send account or turn requests"
         );
         self.send(json!({"id":id,"method":method,"params":params}))?;
@@ -145,7 +145,7 @@ impl Server {
             }
         }
     }
-    fn stop(mut self) -> Result<()> {
+    pub(super) fn stop(mut self) -> Result<()> {
         self.input.take();
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.child.0.try_wait()?.is_none() && Instant::now() < deadline {
@@ -367,6 +367,7 @@ fn appserver_projection(initialize_missing: bool) -> Result<()> {
             name: format!("Synthetic {id}"),
             base_url: format!("{endpoint}/v1"),
             model: model.into(),
+            native_fast: false,
         });
         request.api_key = Some("synthetic-local-only-key".into());
         request.official_model = (id == "official").then(|| model.into());

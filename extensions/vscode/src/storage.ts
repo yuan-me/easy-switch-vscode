@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
-export interface Provider { id: string; name: string; baseUrl: string; model: string }
+export interface Provider { id: string; name: string; baseUrl: string; model: string; nativeFast?: boolean }
 export const official: Provider = { id: 'official', name: '官方 ChatGPT', baseUrl: '', model: '' };
 export interface State { get<T>(key: string): T | undefined; update(key: string, value: unknown): Thenable<void> | Promise<void> }
 export interface Secrets { get(key: string): Thenable<string | undefined> | Promise<string | undefined>; store(key: string, value: string): Thenable<void> | Promise<void>; delete(key: string): Thenable<void> | Promise<void> }
@@ -10,6 +10,7 @@ export function validateOfficialModel(text: string): string | undefined {
 }
 
 export function validateProvider(value: Provider): void {
+  if (value.nativeFast !== undefined && typeof value.nativeFast !== 'boolean') throw new Error('Fast 设置格式无效。');
   if (!/^esv_[0-9a-f]{32}$/.test(value.id)) throw new Error('服务商 ID 无效。');
   if (!value.name.trim() || !value.model.trim()) throw new Error('名称和模型不能为空。');
   if (value.name.length > 200 || value.model.length > 200 || /\p{Cc}/u.test(value.name + value.model)) throw new Error('名称或模型包含无效字符，或超过长度限制。');
@@ -47,7 +48,7 @@ export class ProviderStore {
       const p = value as Provider;
       if (typeof p.id !== 'string' || typeof p.name !== 'string' || typeof p.baseUrl !== 'string' || typeof p.model !== 'string') throw new Error('服务商记录格式无效。');
       validateProvider(p);
-      return { id: p.id, name: p.name, baseUrl: p.baseUrl, model: p.model };
+      return { id: p.id, name: p.name, baseUrl: p.baseUrl, model: p.model, ...(p.nativeFast === undefined ? {} : { nativeFast: p.nativeFast }) };
     });
     if (new Set(result.map(p => p.id)).size !== result.length) throw new Error('服务商列表包含重复 ID。');
     return result;

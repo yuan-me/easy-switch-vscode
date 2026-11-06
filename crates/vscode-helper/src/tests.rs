@@ -1,5 +1,6 @@
 use super::*;
 use rusqlite::{Connection, params};
+mod fast;
 mod appserver;
 mod forks;
 mod repair;
@@ -76,6 +77,7 @@ impl Fixture {
             name: format!("Provider {id}"),
             base_url: "https://example.test/v1".into(),
             model: model.into(),
+            native_fast: false,
         });
         self.request.api_key = Some(format!("synthetic-key-{id}"));
         self.request.expected_config_fingerprint = Some(journal::hash_bytes(

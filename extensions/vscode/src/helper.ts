@@ -5,7 +5,7 @@ import type { Target } from './environment';
 export interface Operation { id: string; state: string; description: string; fileCount: number }
 export interface RepairPlan { fingerprint: string; fileCount: number; items: { path: string; line: number; detail: string; missingImage: boolean }[] }
 export interface SettingsPlan { fingerprint: string; fileCount: number; items: { threadId: string; path: string; sourceHash: string }[] }
-export interface HelperResult { protocolVersion: 1; activeProviderId: string | null; operations?: Operation[]; sessionCount?: number | null; repairPlan?: RepairPlan; settingsPlan?: SettingsPlan; repairedFileCount?: number; configFingerprint?: string | null; committed?: boolean; home?: string; sqliteHome?: string | null; officialModel?: string | null }
+export interface HelperResult { protocolVersion: 1; activeProviderId: string | null; nativeFastEnabled?: boolean; operations?: Operation[]; sessionCount?: number | null; repairPlan?: RepairPlan; settingsPlan?: SettingsPlan; repairedFileCount?: number; configFingerprint?: string | null; committed?: boolean; home?: string; sqliteHome?: string | null; officialModel?: string | null }
 export interface Progress { type: 'progress'; stage: string; detail: string; completed?: number; total?: number }
 export function progressMessage(event: Progress): string {
   const { completed, total } = event;
@@ -49,6 +49,7 @@ export function runHelper(binary: string, request: HelperRequest, onProgress: (v
         else if (event.type === 'error' && typeof event.message === 'string') failure = safe(event.message);
         else if (event.type === 'result' && event.protocolVersion === 1 && (event.activeProviderId === null || typeof event.activeProviderId === 'string')) {
           if (result) throw new Error();
+          if (event.nativeFastEnabled !== undefined && typeof event.nativeFastEnabled !== 'boolean') throw new Error();
           if (event.repairPlan !== undefined) {
             const p = event.repairPlan as RepairPlan;
             if (!p || typeof p.fingerprint !== 'string' || !/^[a-fA-F0-9]{64}$/.test(p.fingerprint) || !Number.isSafeInteger(p.fileCount) || p.fileCount < 1 || !Array.isArray(p.items) || !p.items.length || p.items.some(i => !i || typeof i.path !== 'string' || typeof i.detail !== 'string' || !Number.isSafeInteger(i.line) || i.line < 1 || typeof i.missingImage !== 'boolean')) throw new Error();

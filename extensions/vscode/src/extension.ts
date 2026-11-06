@@ -9,6 +9,9 @@ import { confirmManualStop } from './manualStop';
 import { runHelper, progressMessage, type HelperRequest, type HelperResult, type Operation } from './helper';
 import { ProviderStore, official, validateProvider, validateOfficialModel, type Provider } from './storage';
 import { registerUpdates } from './updates';
+import { prepareFast } from './fast';
+import { editProviderForm } from './providerForm';
+import { providersHtml } from './providersView';
 
 class Row extends vscode.TreeItem {
   constructor(label: string, readonly provider?: Provider, readonly children?: Row[]) {
@@ -25,7 +28,7 @@ class Row extends vscode.TreeItem {
 interface Ready { sourceTarget: Target; target: Target; store: ProviderStore; storeRoot: string; binary: string; codex: vscode.Extension<unknown> }
 const unfinished = (operation: Operation) => !['Complete', 'Restored', 'RolledBack'].includes(operation.state);
 
-class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
+class SwitchView implements vscode.TreeDataProvider<Row>, vscode.WebviewViewProvider, vscode.Disposable {
   private readonly changed = new vscode.EventEmitter<void>();
   readonly onDidChangeTreeData = this.changed.event;
   private readonly status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 20);
@@ -37,6 +40,8 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   private reloadPending = false;
   private operationUncertain = false;
   private promptedRecovery = false;
+  private providerView?: vscode.WebviewView;
+  private readonly viewNonce = randomUUID();
   constructor(private readonly context: vscode.ExtensionContext) {
     this.status.command = 'easySwitch.switchProvider';
     this.status.text = '$(arrow-swap) Easy Switch';
@@ -44,6 +49,17 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
   }
   dispose(): void { this.status.dispose(); this.changed.dispose(); }
   getTreeItem(item: Row): vscode.TreeItem { return item; }
+  resolveWebviewView(view: vscode.WebviewView): void {
+    this.providerView = view;
+    view.webview.options = { enableScripts: true, localResourceRoots: [] };
+    this.context.subscriptions.push(view.webview.onDidReceiveMessage(message => {
+      if (!['addProvider', 'editProvider', 'switchProvider', 'removeProvider'].includes(message?.action)) return;
+      const provider = this.ready && [official, ...this.ready.store.list()].find(p => p.id === message.id);
+      if (message.action !== 'addProvider' && !provider) return;
+      void vscode.commands.executeCommand(`easySwitch.${message.action}`, provider ? new Row(provider.name, provider) : undefined);
+    }), view.onDidDispose(() => { if (this.providerView === view) this.providerView = undefined; }));
+    this.update();
+  }
   getChildren(element?: Row): Row[] {
     if (element) return element.children ?? [];
     if (!this.ready) return [new Row('服务器就绪后显示服务商')];
@@ -51,6 +67,8 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     for (const provider of [official, ...this.ready.store.list()]) {
       const row = new Row(provider.name, provider);
       row.description = provider.id === this.result?.activeProviderId ? '当前配置' : provider.id === 'official' ? '' : provider.model;
+      if (provider.id === this.result?.activeProviderId && this.result.nativeFastEnabled) row.description += ' · Fast 已启用';
+      else if (provider.nativeFast) row.description += ' · Fast 待启用';
       if (provider.id === this.result?.activeProviderId) row.iconPath = new vscode.ThemeIcon('check', new vscode.ThemeColor('testing.iconPassed'));
       rows.push(row);
     }
@@ -108,10 +126,15 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     this.status.text = this.busy ? '$(sync~spin) Easy Switch' : `$(arrow-swap) ${this.error ? '检查未通过' : !this.result ? '检查中' : this.reloadPending ? '待重载' : name}`;
     this.status.tooltip = this.error ?? `Easy Switch · ${os.hostname()}\n配置目录：${this.ready?.target.home ?? '尚未识别'}\n显示当前保存的配置；连接是否正常，请发送一条消息确认。`;
     this.changed.fire();
+    if (this.providerView) {
+      const html = providersHtml(this.ready ? [official, ...this.ready.store.list()] : [], active, this.result?.nativeFastEnabled === true, this.busy, this.viewNonce);
+      if (this.providerView.webview.html !== html) this.providerView.webview.html = html;
+    }
   }
   async command(task: () => Promise<void>): Promise<void> {
     if (this.busy) { void vscode.window.showInformationMessage('切换操作正在进行，请等待完成。'); return; }
     this.busy = true;
+    this.update();
     await vscode.commands.executeCommand('setContext', 'easySwitch.busy', true);
     try { await task(); }
     catch (error) {
@@ -200,23 +223,18 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (!create && row?.provider?.id === 'official') { await this.configureOfficialModel(ready); return; }
     const existing = create ? undefined : await this.choose(row, true);
     if (!create && !existing) return;
-    const options = { ignoreFocusOut: true, title: existing ? '编辑服务商' : '添加服务商' };
-    const name = await vscode.window.showInputBox({ ...options, prompt: '服务商名称', value: existing?.name ?? '', validateInput: text => text.trim() ? undefined : '请输入名称' });
-    if (name === undefined) return;
-    const baseUrl = await vscode.window.showInputBox({ ...options, prompt: 'API 地址，例如 https://example.com/v1（需支持 Responses，不含 /responses）', value: existing?.baseUrl ?? '' });
-    if (baseUrl === undefined) return;
-    const model = await vscode.window.showInputBox({ ...options, prompt: '模型 ID（使用服务商提供的模型名称）', value: existing?.model ?? '', validateInput: text => text.trim() ? undefined : '请输入模型 ID' });
-    if (model === undefined) return;
-    const provider: Provider = { id: existing?.id ?? `esv_${randomUUID().replaceAll('-', '')}`, name: name.trim(), baseUrl: baseUrl.trim().replace(/\/+$/, ''), model: model.trim() };
-    validateProvider(provider);
     const savedKey = existing ? await ready.store.key(existing.id) : undefined;
-    const key = await vscode.window.showInputBox({ ...options, password: true, prompt: savedKey ? 'API 密钥（留空则不修改）' : 'API 密钥', placeHolder: savedKey ? '已保存密钥' : undefined });
-    if (key === undefined) return;
-    if (provider.baseUrl.startsWith('http:') && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(provider.baseUrl).hostname)) {
-      const choice = await vscode.window.showWarningMessage('这个 API 地址使用未加密的 HTTP，发送请求时密钥和聊天内容可能被网络中的其他人读取。', { modal: true }, '仍然保存');
-      if (!choice) return;
-    }
-    await ready.store.save(provider, key || undefined);
+    const saved = await editProviderForm(existing, !!savedKey, async input => {
+      const { key, ...values } = input;
+      const provider: Provider = { id: existing?.id ?? `esv_${randomUUID().replaceAll('-', '')}`, ...values };
+      validateProvider(provider);
+      if (provider.baseUrl.startsWith('http:') && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(provider.baseUrl).hostname)) {
+        const choice = await vscode.window.showWarningMessage('这个 API 地址使用未加密的 HTTP，发送请求时密钥和聊天内容可能被网络中的其他人读取。', { modal: true }, '仍然保存');
+        if (!choice) throw new Error('尚未保存。请改用 HTTPS，或确认使用 HTTP。');
+      }
+      await ready.store.save(provider, key || undefined);
+    });
+    if (!saved) return;
     this.update();
     void vscode.window.showInformationMessage('已保存服务商。点击“切换并重载”开始使用。');
   }
@@ -242,6 +260,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     if (!provider) return;
     const ready = this.requireReady();
     this.supported(ready);
+    const applyFast = provider.nativeFast ? await prepareFast(ready.codex.extensionPath, ready.codex.packageJSON.version) : undefined;
     const apiKey = provider.id === 'official' ? undefined : await ready.store.key(provider.id);
     if (provider.id !== 'official' && !apiKey) throw new Error('当前客户端没有该服务商的密钥，请编辑服务商重新输入。');
     let officialModel = this.result?.officialModel ?? ready.store.officialModel();
@@ -261,8 +280,10 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     const settings = before.settingsPlan;
     if (settings && ready.codex.packageJSON.version !== '26.1021.22027') throw new Error('旧聊天设置初始化目前已验证官方 Codex 26.1021.22027，请在服务器端使用此版本后重试。聊天未修改。');
     const settingsDetail = settings ? `\n\n发现 ${settings.fileCount} 个旧聊天缺少自身的设置快照。本次会保存加密恢复信息（大聊天优先使用差量），并为这些聊天建立新设置：只读文件、网络受限、需要时向你申请权限，协作模式为默认。旧审批、协作模式、推理偏好和插件禁用列表无法可靠还原，将使用新设置的默认值；不会复制父聊天的权限。消息正文、线程关系和归档状态保留，已有有效快照的聊天保留原设置。切换后如需写文件，请在官方 Codex 中调整权限。\n\n待初始化的文件：\n${settings.items.slice(0, 10).map(i => i.path).join('\n')}${settings.fileCount > 10 ? `\n另有 ${settings.fileCount - 10} 个文件。` : ''}` : '';
-    const accepted = await confirmManualStop(`切换到“${provider.name}”并重载 VS Code？`, `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n切换会迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。${settingsDetail}`, settings ? '初始化旧聊天设置并切换' : '切换并重载');
+    const fastDetail = provider.nativeFast ? '\n\nFast 将备份并修改此版本 Codex 的三个界面模块。仅对当前已启用 Fast 的 Easy Switch 服务商开放选项，仍需在 Codex 中手动选择 Fast；实际速度和费用取决于服务商。可运行“恢复 Codex Fast 界面原件”撤销补丁。' : '';
+    const accepted = await confirmManualStop(`切换到“${provider.name}”并重载 VS Code？`, `服务器：${os.hostname()}\nCodex 数据目录：${ready.target.home}\n已有聊天：${before.sessionCount ?? '未知'} 个\n\n切换会迁移聊天并更新共享配置；遇到损坏记录先修复，不会跳过。API 密钥会以明文保存在服务器配置中。如果新服务商无法读取加密历史，原记录会保留，可切回原服务商。${settingsDetail}${fastDetail}`, settings ? '初始化旧聊天设置并切换' : '切换并重载');
     if (!accepted) return;
+    await applyFast?.();
     const journalKey = await ready.store.journalKey();
     await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Easy Switch', cancellable: false }, async progress => {
       this.progress = '正在备份并切换'; this.update(); progress.report({ message: this.progress });
@@ -331,6 +352,14 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.Disposable {
     void vscode.window.showInformationMessage('已清理未提交或已完成回滚的失败操作文件，以及成功操作的提交副本。聊天、成功操作的恢复备份和未完成回滚所需文件保留。');
     await this.refresh();
   }
+  async restoreFast(): Promise<void> {
+    const ready = this.requireReady();
+    this.ensureStable();
+    const restore = await prepareFast(ready.codex.extensionPath, ready.codex.packageJSON.version, true);
+    if (!await confirmManualStop('恢复 Codex Fast 界面原件并重载？', '将恢复 Easy Switch 保存的三个官方界面模块。服务商和聊天不变；API 模式的原生 Fast 选项将不再开放。', '恢复并重载')) return;
+    await restore();
+    await this.reload();
+  }
   private ensureStable(): void {
     this.requireReady();
     if (!this.result) throw new Error('尚未确认操作状态，请先刷新检查，再打开 Codex 或重载窗口。');
@@ -356,11 +385,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       getTreeItem: item => view.getTreeItem(item),
       getChildren: item => view.getInformation(item)
     }),
-    vscode.window.registerTreeDataProvider('easySwitch.providers', view));
+    vscode.window.registerWebviewViewProvider('easySwitch.providers', view));
   const commands: Record<string, (row?: Row) => Promise<void>> = {
     addProvider: () => view.edit(undefined, true), editProvider: row => view.edit(row), removeProvider: row => view.remove(row),
     switchProvider: row => view.switch(row), refresh: () => view.refresh(), recover: () => view.recover(), reload: () => view.reload(),
-    openCodex: () => view.openCodex(), repairHistories: () => view.repairHistories(), cleanupFiles: () => view.cleanupFiles(), showError: () => view.showError()
+    openCodex: () => view.openCodex(), repairHistories: () => view.repairHistories(), cleanupFiles: () => view.cleanupFiles(), restoreFast: () => view.restoreFast(), showError: () => view.showError()
   };
   for (const [name, callback] of Object.entries(commands)) context.subscriptions.push(vscode.commands.registerCommand(`easySwitch.${name}`, (row?: Row) => view.command(() => callback(row))));
   await vscode.commands.executeCommand('setContext', 'easySwitch.busy', false);

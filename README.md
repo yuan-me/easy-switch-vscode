@@ -12,6 +12,8 @@
 
 安装包同时包含 Linux x64 和 ARM64 工具，服务器无需编译 Rust。当前支持的官方 Codex 版本和已完成的测试见 [兼容性说明](extensions/vscode/COMPATIBILITY.md)。完整的配置、手动停止提醒和恢复步骤见 [使用说明](extensions/vscode/README.md)。
 
+0.1.15 将服务商配置合并为单页表单，生效的 Fast 状态显示为绿色，并更新了扩展与侧栏图标。服务商设置中保留 Fast 开关。启用并切换后，可在 Codex 中选择 Standard / Fast；启用时会对三个界面模块应用可恢复补丁。实际速度和费用取决于服务商，详见 [Fast 说明](extensions/vscode/README.md)。
+
 ## 无需 sudo
 
 0.1.8 已移除全部进程检查和自动停止逻辑。切换、修复和恢复前会显示红色提醒，由用户手动停止当前及其他窗口、CLI 的 Codex 后端，再确认继续。插件不验证停写状态；仍有进程写入可能损坏聊天。文件校验、加密备份和回滚保留。

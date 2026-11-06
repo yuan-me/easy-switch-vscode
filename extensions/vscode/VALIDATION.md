@@ -1,6 +1,26 @@
 # VS Code 扩展验证记录
 
-更新：2026-11-02（Asia/Shanghai）。
+更新：2026-11-06（Asia/Shanghai）。
+
+## 0.1.15 配置表单、Fast 状态与图标（2026-11-06）
+
+- Node / TypeScript 70 项测试通过；Windows helper 33 项通过、5 项需外部样本或官方程序的测试忽略。Linux x64 / ARM64 helper 重新编译，新增实际配置的 Fast 状态字段。此版本未重跑全部 Linux QEMU 回归，上一版的验证范围见下文。
+- 服务商列表改用 Webview，保留服务器信息原生分区、切换、编辑、删除和添加操作。绿色“Fast 已启用”读取 helper 返回的实际配置，不从未应用的服务商设置推断。
+- 单页表单测试覆盖字段显示、已有密钥留空保留、开关保存、取消、非法消息、保存失败后重试、输入转义与密钥错误信息遮盖。默认不将密钥写入页面源代码或 Webview 持久状态。
+- 用 Playwright / Edge 在本机回环地址加载真实 Webview HTML，验证浅色、深色（1000×780）、侧栏（360×260）与窄表单（380×850）。验证密钥显隐、Fast 切换、保存消息、内联错误保留输入、取消、必填字段和编辑按钮消息；无页面脚本错误或横向溢出。当前未提供 Browser 插件，因此使用本地 Playwright。
+- 新图标为原创双向箭头几何图形，扩展用 128×128 PNG，活动栏用随主题着色的 SVG。页面截图与交互证据保存在本机 Codex visualizations 目录，不进入安装包。
+- 未安装到真实 Remote-SSH，也未验证真实 VS Code Webview 宿主中的重载、焦点与主题表现。此次没有连接账号或修改服务器配置，Fast 兼容检查保持不变。
+
+## 0.1.14 服务商 Fast 开关（2026-11-06）
+
+- Node / TypeScript 测试 65 项通过，打包审计测试 4 项通过。覆盖 Fast 设置保存与取消、确认前只读预检、确认后应用补丁、标志传递和认证范围。
+- Windows helper 回归 33 项通过，4 项当时未启用的集成测试忽略。新增官方程序 `model/list` / `config/read` 用例单独通过：模型声明包含 priority，界面能读到 Fast 配置范围。
+- Linux x64 和 ARM64 在无网卡、无宿主目录共享的 QEMU 内各通过 34 项 helper 测试，6 项外部样本或官方程序测试默认忽略；随后各自运行 3 项官方 app-server 用例，全部通过，覆盖旧聊天设置初始化、搜索重建和 Fast 声明。ARM64 官方程序来自 26.51021.22027 预发布包，CLI 同为 0.164.0-alpha.11.1；它不是正式版 ARM64 界面验收。
+- 三个真实官方界面模块在隔离副本中完成补丁和语法检查，原生界面及请求门控函数验证了启用、关闭、官方登录和 `fast_mode = false` 限制。重复安装可行，恢复后与原件逐字节一致，外部改动会阻止覆盖。没有修改本机已安装的官方扩展。复验命令：`node scripts/validate-fast.cjs <官方扩展目录>`。
+- 真实 Windows Codex app-server 向本机模拟 Responses 接口发送合成请求：同一聊天依次选择 priority、default、priority、null，捕获到的 `service_tier` 分别为 priority、缺省、priority、缺省。模拟接口返回测试错误，只验证请求传递，没有调用真实模型或使用真实账号。
+- 未安装到真实 Remote-SSH 窗口，未完成真实界面点击、重载和供应商继续回复验收；Fast 速度、供应商收费与外部服务支持不在本次验证范围。界面补丁只支持已核对的精确版本，安装确认页会说明改动与恢复方式。
+
+本地证据：`artifacts/fast-node.log`、`fast-rust.log`、`fast-official.log`、`fast-wire.log`，以及 `fast-linux-{x64,arm64}/`、`fast-official-linux-{x64,arm64}/`。这些运行日志留在本地，不包含真实聊天或凭据。
 
 ## 0.1.13 磁盘占用、失败清理和进度（2026-11-02）
 

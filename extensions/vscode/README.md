@@ -8,7 +8,7 @@
 
 1. 使用 VS Code 的 Remote-SSH 连接 Linux 服务器，并打开服务器上的项目。
 2. 在扩展页面确认官方 Codex（`openai.chatgpt`）已安装在 “SSH: 你的服务器”，且能正常打开。
-3. 在这个远程窗口运行命令 “Extensions: Install from VSIX...”，选择 `easy-switch-remote-0.1.13.vsix`。安装后确认 Easy Switch 也位于 “SSH: 你的服务器” 中。
+3. 在这个远程窗口运行命令 “Extensions: Install from VSIX...”，选择 `easy-switch-remote-0.1.15.vsix`。安装后确认 Easy Switch 也位于 “SSH: 你的服务器” 中。
 4. 打开活动栏中的 Easy Switch，核对目标服务器和 Codex 数据目录。不要在目录识别错误时继续操作。
 
 扩展包包含 Linux x64 和 arm64 工具；服务器无需安装 Rust、Node 构建工具或桌面版 Easy Switch。支持 Linux Remote-SSH，以及官方 Codex `26.1021.22027`、`26.1007.21434`、`26.1002.51308`、`26.51021.22027`。检查以服务器实际安装的版本为准，其他版本会停止切换。各版本的测试范围见 [兼容性说明](COMPATIBILITY.md)。
@@ -39,9 +39,21 @@
 
 ## 使用
 
+### Fast（0.1.14 起）
+
+添加或编辑 API 服务商时选择“启用 Fast”，保存后执行“切换并重载”。随后在 Codex 的速度选项中选择 Standard 或 Fast；启用选项不会强制所有请求使用 Fast。旧服务商默认关闭。0.1.15 起，切换后当前服务商显示绿色“Fast 已启用”；仅保存尚未应用时显示“Fast 待启用”。这一状态表示 Fast 支持已配置，具体聊天仍可选择 Standard 或 Fast。Fast 请求携带 `service_tier = "priority"`，实际速度、支持情况和费用由服务商决定。
+
+Fast 启用前会检查界面模块是否兼容。启用时会在官方扩展的 `webview/assets/.easy-switch-fast/` 保存原件，再修改对应模块；补丁按当前配置判断，仅对启用 Fast 的 Easy Switch API 服务商开放，保留 Codex 的功能限制。官方扩展升级或文件被其他工具修改后会停止应用补丁，不猜测兼容性。
+
+关闭服务商 Fast 后，需要再次切换并重载；Fast 模型目录引用会移除。切换后的新聊天默认使用 Standard；启用 Fast 时，已有聊天可保留各自的速度选择。切回官方恢复切换前的全局速度配置。模型声明与配置、聊天迁移使用同一份事务备份；界面补丁独立保留，只有当前服务商启用 Fast 才生效。
+
+命令面板中的“Easy Switch: 恢复 Codex Fast 界面原件”可恢复三个模块并重载。恢复前检查文件是否仍为本扩展生成的版本，不覆盖其他修改。卸载 Easy Switch 前如需撤销补丁，请先执行此命令；重新安装官方 Codex 也可恢复界面文件。
+
+### 切换服务商
+
 侧边栏分为“服务器信息”和“服务商”两区，分区之间使用 VS Code 原生分隔栏，可折叠或拖动调整大小。服务器信息显示 SSH 主机和数据目录；服务商区依次显示官方 ChatGPT、已添加的 API 服务商和添加入口。右上角保留刷新与检查更新，列表不再重复显示刷新、常驻警告和日常无需使用的维护入口。
 
-点击服务商列表末尾的“添加 API 服务商”，依次填写名称、API Base URL、实际模型 ID 和密钥。Base URL 是服务商的接口前缀，例如 `https://api.example.com/v1`，不是 `/responses` 请求地址。首版只支持 Responses，不提供 Chat Completions 转换、聚合路由或模型自动发现。
+点击服务商列表末尾的“添加 API 服务商”，在同一页填写名称、API Base URL、实际模型 ID、密钥和 Fast 开关。编辑时密钥留空则保留已保存的密钥；保存失败会在表单内提示，输入内容保留。Base URL 是服务商的接口前缀，例如 `https://api.example.com/v1`，不是 `/responses` 请求地址。首版只支持 Responses，不提供 Chat Completions 转换、聚合路由或模型自动发现。
 
 点击服务商时会检查聊天记录和中断操作。需要处理时直接进入修复或恢复确认，也会在信息区显示可点击的异常项；这两个命令仍可从命令面板打开。修复或恢复完成后先重载，再点击目标服务商切换，不会无提示地修改聊天。操作确认页仍保留手动停止 Codex 的醒目提醒。
 

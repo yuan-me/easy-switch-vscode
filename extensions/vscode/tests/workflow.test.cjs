@@ -72,7 +72,7 @@ async function host(options, check) {
   const state = { get: key => values.get(key), update: async (key, value) => { values.set(key, structuredClone(value)); } };
   const secretStorage = { get: async key => secrets.get(key), store: async (key, value) => { secrets.set(key, value); }, delete: async key => { secrets.delete(key); } };
   const store = await ProviderStore.open(state, secretStorage, home);
-  await store.save(provider, 'test-key');
+  await store.save({ ...provider, ...(options.nativeFast === undefined ? {} : { nativeFast: options.nativeFast }) }, 'test-key');
   await store.journalKey();
   let repaired = false;
   let view, phase = options.pending ? 'pending' : 'ready', activated = 0, inspections = 0;
@@ -95,11 +95,12 @@ async function host(options, check) {
       createStatusBarItem: () => ({ show() {}, dispose() {} }),
       showTextDocument: async document => { events.push({ document }); },
       registerTreeDataProvider: (_, provider) => { view = provider; return new Disposable(); },
+      registerWebviewViewProvider: (_, provider) => { view = provider; return new Disposable(); },
       showWarningMessage: async (message, options) => { messages.push(message); if (options?.detail) events.push({ detail: options.detail }); return undefined; },
       showErrorMessage: async (message, ...actions) => { messages.push(message); events.push({ errorActions: actions }); },
       showInformationMessage: async message => { messages.push(message); },
-      showQuickPick: async items => items.find(item => item.provider?.id === provider.id),
-      showInputBox: async input => { inputs.push(input); events.push('modelInput'); return options.modelInput; },
+      showQuickPick: async items => items.find(item => item.provider?.id === provider.id) ?? items.find(item => typeof item.enabled === 'boolean' && item.enabled === options.fastChoice),
+      showInputBox: async input => { inputs.push(input); events.push('modelInput'); return options.editInputs ? options.editInputs.shift() : options.modelInput; },
       withProgress: async (_, callback) => callback({ report(value) { events.push({ progress: value.message }); } })
     }
   };
@@ -108,6 +109,16 @@ async function host(options, check) {
   fs.access = async () => {};
   environment.discoverTarget = async () => ({ home, ...(options.envSqlite ? { sqliteHome: options.envSqlite } : {}) });
   const manual = require('../out/manualStop'), savedConfirm = manual.confirmManualStop;
+  const fast = require('../out/fast'), savedFast = fast.prepareFast;
+  const form = require('../out/providerForm'), savedForm = form.editProviderForm;
+  form.editProviderForm = async (existing, hasKey, save) => {
+    events.push({ form: existing, hasKey });
+    if (options.fastChoice === undefined) return false;
+    const [name, baseUrl, model, key] = options.editInputs;
+    await save({ name, baseUrl, model, key, nativeFast: options.fastChoice });
+    return true;
+  };
+  fast.prepareFast = async () => { events.push('fastPreflight'); return async () => { events.push('fastPatch'); }; };
   manual.confirmManualStop = async (title, detail) => { events.push('confirm'); events.push({ detail }); return title.startsWith('修复聊天') ? !!options.acceptRepair : !options.cancelConfirmation; };
   helper.runHelper = async (_, request, onProgress) => {
     if (request.action === 'inspect') { inspections++; if (options.pendingDuringPreflight && inspections > 1) phase = 'pending'; events.push({ inspect: structuredClone(request) }); if (options.inspectFails || (options.failAfterFirstInspection && inspections > 1)) throw Error('会话扫描存在异常：synthetic.jsonl：会话元数据重复且无法确认继承关系'); return snapshot(); }
@@ -116,7 +127,7 @@ async function host(options, check) {
     if (options.mutationFails) { phase = 'pending'; throw Error('模拟部分提交'); }
     phase = 'ready';
     if (request.action === 'repair') repaired = true;
-    return { type: 'result', protocolVersion: 1, committed: true, activeProviderId: provider.id, repairPlan: repaired ? undefined : options.repairPlan };
+    return { type: 'result', protocolVersion: 1, committed: true, activeProviderId: provider.id, nativeFastEnabled: request.provider?.nativeFast === true, repairPlan: repaired ? undefined : options.repairPlan };
   };
   Object.defineProperty(process, 'platform', { value: 'linux' });
   try {
@@ -126,11 +137,43 @@ async function host(options, check) {
     await activate(context);
     await check({ options, commands, events, messages, inputs, view, workspace: vscode.workspace, get activated() { return activated; } });
   } finally {
-    manual.confirmManualStop = savedConfirm; Module._load = saved.load; fs.access = saved.access; helper.runHelper = saved.run; environment.discoverTarget = saved.discover;
+    form.editProviderForm = savedForm; fast.prepareFast = savedFast; manual.confirmManualStop = savedConfirm; Module._load = saved.load; fs.access = saved.access; helper.runHelper = saved.run; environment.discoverTarget = saved.discover;
     Object.defineProperty(process, 'platform', saved.platform);
     delete require.cache[require.resolve('../out/extension')];
   }
 }
+
+test('Fast installation follows confirmation and its flag reaches the transactional helper', () => host({ nativeFast: true }, async ({ commands, events, view }) => {
+  assert.ok(view.getChildren().find(row => row.provider?.id === provider.id).description.includes('Fast 待启用'));
+  await commands.get('easySwitch.switchProvider')({ provider });
+  assert.ok(events.indexOf('fastPreflight') < events.indexOf('confirm'));
+  assert.ok(events.indexOf('confirm') < events.indexOf('fastPatch'));
+  const mutation = events.find(e => e.mutation);
+  assert.equal(mutation.mutation.provider.nativeFast, true);
+  assert.ok(events.indexOf('fastPatch') < events.indexOf(mutation));
+  assert.ok(view.getChildren().find(row => row.provider?.id === provider.id).description.includes('Fast 已启用'));
+}));
+
+test('cancelling Fast confirmation never patches Codex or switches provider', () => host({ nativeFast: true, cancelConfirmation: true }, async ({ commands, events }) => {
+  await commands.get('easySwitch.switchProvider')({ provider });
+  assert.ok(events.includes('fastPreflight'));
+  assert.ok(!events.includes('fastPatch'));
+  assert.ok(!events.some(e => e.mutation));
+}));
+
+test('editing a provider saves Fast without applying it until switching', () => host({ editInputs: ['服务商 A', provider.baseUrl, provider.model, ''], fastChoice: true }, async ({ commands, view, events }) => {
+  await commands.get('easySwitch.editProvider')({ provider });
+  assert.equal(view.getChildren().find(row => row.provider?.id === provider.id).provider.nativeFast, true);
+  assert.ok(!events.includes('fastPatch'));
+  assert.ok(!events.some(e => e.mutation));
+}));
+
+test('cancelling the Fast picker retains the existing provider', () => host({ nativeFast: false, editInputs: ['Unsaved change', provider.baseUrl, provider.model, ''] }, async ({ commands, view }) => {
+  await commands.get('easySwitch.editProvider')({ provider });
+  const saved = view.getChildren().find(row => row.provider?.id === provider.id).provider;
+  assert.equal(saved.name, provider.name);
+  assert.equal(saved.nativeFast, false);
+}));
 
 test('target validation precedes manual confirmation and displays inspected directory without inventing env override', () => host({}, async ({ commands, events, view }) => {
   assert.ok(view.getInformation().some(row => String(row.tooltip).includes('/data/sqlite')));
@@ -172,7 +215,7 @@ test('startup scan error keeps providers, target, actions and full diagnostics v
   await commands.get('easySwitch.showError')();
   assert.match(events.find(e => e.document).document.content, /元数据重复/);
   await commands.get('easySwitch.editProvider')({ provider });
-  assert.equal(inputs.at(-1).value, provider.name);
+  assert.equal(events.find(e => e.form).form.name, provider.name);
   options.modelInput = 'known-official-model';
   await commands.get('easySwitch.switchProvider')({ provider });
   await commands.get('easySwitch.removeProvider')({ provider });

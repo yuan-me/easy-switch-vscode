@@ -14,6 +14,18 @@ class Secrets {
 }
 const provider = { id: 'esv_' + 'a'.repeat(32), name: '服务商 A', baseUrl: 'https://example.com/v1', model: 'model-a' };
 
+test('Fast opt-in survives editing and reopening; legacy providers remain disabled', async () => {
+  const state = new State(), secrets = new Secrets();
+  const store = await ProviderStore.open(state, secrets, '/home/user/.codex');
+  await store.save(provider, 'test-key');
+  assert.equal(store.list()[0].nativeFast, undefined);
+  await store.save({ ...provider, nativeFast: true });
+  assert.equal((await ProviderStore.open(state, secrets, '/home/user/.codex')).list()[0].nativeFast, true);
+  await store.save({ ...provider, nativeFast: false });
+  assert.equal(store.list()[0].nativeFast, false);
+  assert.throws(() => validateProvider({ ...provider, nativeFast: 'true' }), /Fast 设置/);
+});
+
 test('official fallback model survives reopening and stays isolated by server and Home', async () => {
   const state = new State(), secrets = new Secrets();
   const store = await ProviderStore.open(state, secrets, '/home/user/.codex');

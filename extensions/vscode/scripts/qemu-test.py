@@ -200,7 +200,9 @@ def run(args):
         report["codexSha256"] = hashlib.sha256(codex).hexdigest()
         report["bundledBwrapSha256"] = hashlib.sha256(bwrap).hexdigest() if bwrap else None
         report["expectedCodexVersion"] = args.codex_version
-        report["passed"] = report["passed"] and "PASS isolated real schema/parser/reconciliation" in text and "2 passed" in text
+        report["passed"] = (report["passed"] and "PASS isolated real schema/parser/reconciliation" in text
+                            and "PASS official model/list exposes priority and config/read retains Fast scope" in text
+                            and "3 passed" in text)
     if sample_count:
         report["passed"] = report["passed"] and "7 sample copies scanned; 7 model/provider round trips passed; 6 missing settings snapshots explicitly initialized" in text
     (output / "result.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf8")
