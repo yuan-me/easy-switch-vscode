@@ -368,6 +368,7 @@ fn appserver_projection(initialize_missing: bool) -> Result<()> {
             base_url: format!("{endpoint}/v1"),
             model: model.into(),
             native_fast: false,
+            visible_models: None,
         });
         request.api_key = Some("synthetic-local-only-key".into());
         request.official_model = (id == "official").then(|| model.into());

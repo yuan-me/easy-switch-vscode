@@ -11,6 +11,7 @@ fn real_appserver_exposes_fast_catalog() -> Result<()> {
     fs::remove_file(f.request.home.join("auth.json"))?;
     f.select("a", "synthetic-fast-model");
     f.request.provider.as_mut().unwrap().native_fast = true;
+    f.request.provider.as_mut().unwrap().visible_models = Some(vec!["synthetic-fast-model".into(), "synthetic-other".into()]);
     f.request.provider.as_mut().unwrap().base_url = "http://127.0.0.1:9/v1".into();
     f.run()?;
     // Let the real binary create its full schema instead of opening the fixture's minimal index.
@@ -20,9 +21,13 @@ fn real_appserver_exposes_fast_catalog() -> Result<()> {
     let started = appserver::Server::start(&executable, root, "http://127.0.0.1:9", &evidence);
     if started.is_err() { eprintln!("{}", fs::read_to_string(&evidence).unwrap_or_default()); }
     let mut server = started?;
-    let models = server.rpc(2, "model/list", json!({"includeHidden":true}))?;
-    let model = models["data"].as_array().context("missing models")?.iter().find(|m| m["model"] == "synthetic-fast-model").context("missing synthetic model")?;
-    ensure!(model["serviceTiers"].as_array().is_some_and(|tiers| tiers.iter().any(|t| t["id"] == "priority")), "Fast tier missing: {model}");
+    let models = server.rpc(2, "model/list", json!({"includeHidden":false}))?;
+    let rows = models["data"].as_array().context("missing models")?;
+    assert_eq!(rows.iter().map(|m| m["model"].as_str().unwrap()).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["synthetic-fast-model", "synthetic-other"]));
+    for model in rows {
+        ensure!(model["serviceTiers"].as_array().is_some_and(|tiers| tiers.iter().any(|t| t["id"] == "priority")), "Fast tier missing: {model}");
+    }
     let config = server.rpc(3, "config/read", json!({"includeLayers":false,"cwd":null}))?;
     ensure!(config["config"]["model_provider"] == PROVIDER, "wrong provider");
     ensure!(config["config"]["model_catalog_json"].as_str().is_some_and(|p| p.ends_with("fast-models.json")), "catalog path missing from UI config projection");
@@ -65,8 +70,19 @@ fn fast_catalog_is_transactional_and_official_settings_are_restored() {
     assert!(manifest.files.iter().any(|file| file.path == catalog));
 
     f.select("b", "api-b-model");
+    f.request.provider.as_mut().unwrap().visible_models = Some(vec!["api-b-model".into(), "api-a-model".into()]);
     f.run().unwrap();
     assert_eq!(inspect(&f.request).unwrap()["nativeFastEnabled"], false);
+    let plain = f.request.store_root.join("provider-models.json");
+    assert_eq!(read_config(&home).unwrap().1["model_catalog_json"].as_str(), plain.to_str());
+    let data: Value = serde_json::from_slice(&fs::read(plain).unwrap()).unwrap();
+    assert_eq!(data["models"].as_array().unwrap().len(), 2);
+    assert_eq!(data["models"][0]["slug"], "api-b-model");
+    assert_eq!(data["models"][1]["slug"], "api-a-model");
+    assert_eq!(data["models"][1]["service_tiers"], json!([]));
+    assert_eq!(data["models"][1]["context_window"], 123456);
+    f.select("legacy", "old-model");
+    f.run().unwrap();
     assert!(read_config(&home).unwrap().1.get("model_catalog_json").is_none());
     f.select("official", "official-model");
     f.run().unwrap();

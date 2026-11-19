@@ -78,6 +78,7 @@ impl Fixture {
             base_url: "https://example.test/v1".into(),
             model: model.into(),
             native_fast: false,
+            visible_models: None,
         });
         self.request.api_key = Some(format!("synthetic-key-{id}"));
         self.request.expected_config_fingerprint = Some(journal::hash_bytes(

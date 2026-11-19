@@ -14,7 +14,7 @@ export function progressMessage(event: Progress): string {
 }
 export interface HelperRequest extends Target {
   protocolVersion: 1; action: 'inspect' | 'switch' | 'recover' | 'repair' | 'cleanup'; storeRoot: string;
-  provider?: Provider | { id: 'official' }; apiKey?: string; journalKey?: string;
+  provider?: (Omit<Provider, 'catalog'> & { visibleModels?: string[] }) | { id: 'official' }; apiKey?: string; journalKey?: string;
   operationId?: string; expectedConfigFingerprint?: string; projectDirs?: string[]; officialModel?: string;
   repairFingerprint?: string;
   settingsFingerprint?: string;

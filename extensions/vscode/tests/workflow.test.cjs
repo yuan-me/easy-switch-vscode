@@ -111,8 +111,9 @@ async function host(options, check) {
   const manual = require('../out/manualStop'), savedConfirm = manual.confirmManualStop;
   const fast = require('../out/fast'), savedFast = fast.prepareFast;
   const form = require('../out/providerForm'), savedForm = form.editProviderForm;
-  form.editProviderForm = async (existing, hasKey, save) => {
+  form.editProviderForm = async (existing, hasKey, save, fetchModels) => {
     events.push({ form: existing, hasKey });
+    if (options.editForm) return options.editForm(existing, save, fetchModels);
     if (options.fastChoice === undefined) return false;
     const [name, baseUrl, model, key] = options.editInputs;
     await save({ name, baseUrl, model, key, nativeFast: options.fastChoice });
@@ -167,6 +168,36 @@ test('editing a provider saves Fast without applying it until switching', () => 
   assert.ok(!events.includes('fastPatch'));
   assert.ok(!events.some(e => e.mutation));
 }));
+
+test('model selection uses the right key and reaches preflight and switch only after saving', async () => {
+  const models = require('../out/providerModels');
+  const fetch = models.fetchProviderModels;
+  const calls = [];
+  models.fetchProviderModels = async (url, key) => { calls.push([url.href, key]); return ['model-b']; };
+  try {
+    await host({ async editForm(existing, save, lookup) {
+      await assert.rejects(lookup('https://elsewhere.test/v1', ''), /重新输入密钥/);
+      await assert.rejects(lookup('http://elsewhere.test/v1', 'fresh'), /已取消/);
+      await lookup('https://elsewhere.test/v1', 'fresh');
+      const [model] = await lookup(existing.baseUrl, '');
+      await save({ ...existing, model, key: '', nativeFast: false,
+        catalog: { available: ['model-a', 'model-b', 'model-c'], excluded: ['model-c'], updatedAt: 123 } });
+      return true;
+    } }, async ({ commands, events, view }) => {
+      await commands.get('easySwitch.editProvider')({ provider });
+      assert.deepEqual(calls, [['https://elsewhere.test/v1', 'fresh'], [provider.baseUrl, 'test-key']]);
+      assert.equal(view.getChildren().find(row => row.provider?.id === provider.id).provider.model, 'model-b');
+      assert.ok(!events.some(e => e.mutation));
+      await commands.get('easySwitch.switchProvider')({ provider });
+      assert.equal(events.find(e => e.inspect?.provider).inspect.provider.model, 'model-b');
+      assert.equal(events.find(e => e.mutation).mutation.provider.model, 'model-b');
+      for (const request of [events.find(e => e.inspect?.provider).inspect, events.find(e => e.mutation).mutation]) {
+        assert.deepEqual(request.provider.visibleModels, ['model-b', 'model-a']);
+        assert.equal(request.provider.catalog, undefined);
+      }
+    });
+  } finally { models.fetchProviderModels = fetch; }
+});
 
 test('cancelling the Fast picker retains the existing provider', () => host({ nativeFast: false, editInputs: ['Unsaved change', provider.baseUrl, provider.model, ''] }, async ({ commands, view }) => {
   await commands.get('easySwitch.editProvider')({ provider });

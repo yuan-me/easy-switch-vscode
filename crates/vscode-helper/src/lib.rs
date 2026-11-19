@@ -51,6 +51,7 @@ pub struct Provider {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
+    pub visible_models: Option<Vec<String>>,
     #[serde(default)]
     pub native_fast: bool,
 }
@@ -518,8 +519,14 @@ fn build_config(req: &Request, mut doc: DocumentMut, state: &mut State) -> Resul
             .and_then(Item::as_value)
             .map(|v| v.decor().clone());
         doc["model"] = value(provider.model.trim());
-        if provider.native_fast {
-            doc["model_catalog_json"] = value(req.store_root.join("fast-models.json").to_string_lossy().as_ref());
+        if let Some(ids) = &provider.visible_models {
+            easy_switch_core::catalog::validate_ids(ids)?;
+            ensure!(ids.contains(&provider.model) && ids.iter().collect::<BTreeSet<_>>().len() == ids.len(),
+                "显示列表必须包含默认模型且不能有重复模型");
+        }
+        if provider.native_fast || provider.visible_models.is_some() {
+            let file = if provider.native_fast { "fast-models.json" } else { "provider-models.json" };
+            doc["model_catalog_json"] = value(req.store_root.join(file).to_string_lossy().as_ref());
         }
         if let Some(decor) = model_decor {
             *doc["model"].as_value_mut().unwrap().decor_mut() = decor;
@@ -775,7 +782,7 @@ fn switch(
         &req.home.join("config.toml"),
         Some(next.to_string().as_bytes()),
     )?;
-    if let Some(provider) = req.provider.as_ref().filter(|p| p.id != "official" && p.native_fast) {
+    if let Some(provider) = req.provider.as_ref().filter(|p| p.id != "official" && (p.native_fast || p.visible_models.is_some())) {
         let cache = req.home.join("models_cache.json");
         let mut templates = Vec::new();
         let official = state.official_config.as_deref().unwrap_or("").parse::<DocumentMut>()?;
@@ -787,12 +794,20 @@ fn switch(
             let data: Value = serde_json::from_slice(&fs::read(path)?).context("本地模型目录 JSON 无效")?;
             templates.extend(data["models"].as_array().context("本地模型目录缺少 models")?.iter().cloned());
         }
-        let mut catalog = easy_switch_core::catalog::model_document(&[provider.model.trim().to_owned()], &templates);
-        let model = &mut catalog["models"][0];
-        model["service_tiers"] = json!([{"id":"priority","name":"Fast","description":"优先处理（以服务商支持为准）"}]);
-        model["additional_speed_tiers"] = json!(["fast"]);
-        model["default_service_tier"] = Value::Null;
-        j.stage(&req.store_root.join("fast-models.json"), Some(&serde_json::to_vec(&catalog)?))?;
+        let ids = provider.visible_models.as_deref().unwrap_or(std::slice::from_ref(&provider.model));
+        let mut catalog = easy_switch_core::catalog::model_document(ids, &templates);
+        for model in catalog["models"].as_array_mut().unwrap() {
+            if provider.native_fast {
+                model["service_tiers"] = json!([{"id":"priority","name":"Fast","description":"优先处理（以服务商支持为准）"}]);
+                model["additional_speed_tiers"] = json!(["fast"]);
+            } else {
+                model["service_tiers"] = json!([]);
+                model["additional_speed_tiers"] = json!([]);
+            }
+            model["default_service_tier"] = Value::Null;
+        }
+        let path = Path::new(next["model_catalog_json"].as_str().unwrap());
+        j.stage(path, Some(&serde_json::to_vec(&catalog)?))?;
     }
     sessions::stage_provider_with_model_settings(
         &mut j,

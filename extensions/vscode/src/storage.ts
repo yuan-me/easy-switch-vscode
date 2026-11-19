@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
-export interface Provider { id: string; name: string; baseUrl: string; model: string; nativeFast?: boolean }
+export interface ModelCatalog { available: string[]; excluded: string[]; updatedAt: number }
+export interface Provider { id: string; name: string; baseUrl: string; model: string; nativeFast?: boolean; catalog?: ModelCatalog }
 export const official: Provider = { id: 'official', name: '官方 ChatGPT', baseUrl: '', model: '' };
 export interface State { get<T>(key: string): T | undefined; update(key: string, value: unknown): Thenable<void> | Promise<void> }
 export interface Secrets { get(key: string): Thenable<string | undefined> | Promise<string | undefined>; store(key: string, value: string): Thenable<void> | Promise<void>; delete(key: string): Thenable<void> | Promise<void> }
@@ -9,14 +10,35 @@ export function validateOfficialModel(text: string): string | undefined {
   return !text.trim() ? '请输入官方模型 ID' : text.trim().length > 200 || /\p{Cc}/u.test(text) ? '模型 ID 不能超过 200 个字符或包含控制字符' : undefined;
 }
 
+export function providerUrl(baseUrl: string): URL {
+  let url: URL;
+  try { url = new URL(baseUrl); } catch { throw new Error('请输入完整的 HTTP/HTTPS API 地址。'); }
+  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || /[?#]/.test(url.href)) throw new Error('API 地址只支持 HTTP/HTTPS，不能包含用户名、密码、查询参数或片段。');
+  url.pathname = url.pathname.replace(/\/+$/, '');
+  return url;
+}
+
 export function validateProvider(value: Provider): void {
   if (value.nativeFast !== undefined && typeof value.nativeFast !== 'boolean') throw new Error('Fast 设置格式无效。');
   if (!/^esv_[0-9a-f]{32}$/.test(value.id)) throw new Error('服务商 ID 无效。');
   if (!value.name.trim() || !value.model.trim()) throw new Error('名称和模型不能为空。');
   if (value.name.length > 200 || value.model.length > 200 || /\p{Cc}/u.test(value.name + value.model)) throw new Error('名称或模型包含无效字符，或超过长度限制。');
-  let url: URL;
-  try { url = new URL(value.baseUrl); } catch { throw new Error('请输入完整的 HTTP/HTTPS API 地址。'); }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) throw new Error('API 地址只支持 HTTP/HTTPS，不能包含用户名、密码、查询参数或片段。');
+  providerUrl(value.baseUrl);
+  if (value.catalog !== undefined) {
+    const c = value.catalog;
+    if (!c || !Number.isSafeInteger(c.updatedAt) || !Number.isFinite(new Date(c.updatedAt).getTime()) ||
+        ![c.available, c.excluded].every(ids => Array.isArray(ids) && ids.length <= 10_000 && ids.every(validModelId) && new Set(ids).size === ids.length) ||
+        c.excluded.includes(value.model)) throw new Error('显示模型列表无效，请重新选择并保留默认模型。');
+  }
+}
+
+export function validModelId(id: unknown): id is string {
+  return typeof id === 'string' && !!id && id === id.trim() && Buffer.byteLength(id) <= 200 && !/\p{Cc}/u.test(id);
+}
+
+export function validateKey(key: string): void {
+  if (!key) throw new Error('请输入 API 密钥。');
+  if (Buffer.byteLength(key) > 16384 || !key.trim() || /\p{Cc}/u.test(key)) throw new Error('API 密钥格式无效。');
 }
 
 export class ProviderStore {
@@ -48,7 +70,7 @@ export class ProviderStore {
       const p = value as Provider;
       if (typeof p.id !== 'string' || typeof p.name !== 'string' || typeof p.baseUrl !== 'string' || typeof p.model !== 'string') throw new Error('服务商记录格式无效。');
       validateProvider(p);
-      return { id: p.id, name: p.name, baseUrl: p.baseUrl, model: p.model, ...(p.nativeFast === undefined ? {} : { nativeFast: p.nativeFast }) };
+      return { id: p.id, name: p.name, baseUrl: p.baseUrl, model: p.model, nativeFast: p.nativeFast, catalog: p.catalog };
     });
     if (new Set(result.map(p => p.id)).size !== result.length) throw new Error('服务商列表包含重复 ID。');
     return result;
@@ -56,9 +78,13 @@ export class ProviderStore {
   key(id: string): PromiseLike<string | undefined> { return this.secrets.get(this.secretKey(`provider:${id}`)); }
   async save(provider: Provider, key?: string): Promise<void> {
     validateProvider(provider);
+    if (Buffer.byteLength(provider.model) > 200 || Buffer.byteLength(provider.name) > 200) throw new Error('模型 ID 和服务商名称各自最多支持 200 字节。');
     const previous = await this.key(provider.id);
-    if (!key && !previous) throw new Error('请输入 API 密钥。');
-    if (key && (key.length > 16384 || !key.trim() || /\p{Cc}/u.test(key))) throw new Error('API 密钥格式无效。');
+    validateKey(key || previous || '');
+    if (!key) {
+      const existing = this.list().find(p => p.id === provider.id);
+      if (!existing || providerUrl(existing.baseUrl).href !== providerUrl(provider.baseUrl).href) throw new Error('API 地址已更改，请重新输入密钥。');
+    }
     const secret = this.secretKey(`provider:${provider.id}`);
     if (key) await this.secrets.store(secret, key);
     try {

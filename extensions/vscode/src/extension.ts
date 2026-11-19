@@ -7,7 +7,8 @@ import { absolutePath, discoverTarget, type Target } from './environment';
 import { supportedCodexVersions } from './compatibility';
 import { confirmManualStop } from './manualStop';
 import { runHelper, progressMessage, type HelperRequest, type HelperResult, type Operation } from './helper';
-import { ProviderStore, official, validateProvider, validateOfficialModel, type Provider } from './storage';
+import { ProviderStore, official, providerUrl, validateKey, validateOfficialModel, type Provider } from './storage';
+import { fetchProviderModels } from './providerModels';
 import { registerUpdates } from './updates';
 import { prepareFast } from './fast';
 import { editProviderForm } from './providerForm';
@@ -27,6 +28,12 @@ class Row extends vscode.TreeItem {
 }
 interface Ready { sourceTarget: Target; target: Target; store: ProviderStore; storeRoot: string; binary: string; codex: vscode.Extension<unknown> }
 const unfinished = (operation: Operation) => !['Complete', 'Restored', 'RolledBack'].includes(operation.state);
+
+async function confirmHttp(url: URL, action: string): Promise<void> {
+  if (url.protocol !== 'http:' || ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) return;
+  const choice = await vscode.window.showWarningMessage(`连接 ${url.host} 使用未加密的 HTTP，发送的密钥和内容可能被网络中的其他人读取。`, { modal: true }, action);
+  if (choice !== action) throw new Error('已取消。可改用 HTTPS 后重试。');
+}
 
 class SwitchView implements vscode.TreeDataProvider<Row>, vscode.WebviewViewProvider, vscode.Disposable {
   private readonly changed = new vscode.EventEmitter<void>();
@@ -227,12 +234,15 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.WebviewViewProv
     const saved = await editProviderForm(existing, !!savedKey, async input => {
       const { key, ...values } = input;
       const provider: Provider = { id: existing?.id ?? `esv_${randomUUID().replaceAll('-', '')}`, ...values };
-      validateProvider(provider);
-      if (provider.baseUrl.startsWith('http:') && !['localhost', '127.0.0.1', '[::1]'].includes(new URL(provider.baseUrl).hostname)) {
-        const choice = await vscode.window.showWarningMessage('这个 API 地址使用未加密的 HTTP，发送请求时密钥和聊天内容可能被网络中的其他人读取。', { modal: true }, '仍然保存');
-        if (!choice) throw new Error('尚未保存。请改用 HTTPS，或确认使用 HTTP。');
-      }
+      await confirmHttp(providerUrl(provider.baseUrl), '仍然保存');
       await ready.store.save(provider, key || undefined);
+    }, async (baseUrl, key) => {
+      const url = providerUrl(baseUrl);
+      if (!key && existing && providerUrl(existing.baseUrl).href !== url.href) throw new Error('API 地址已更改，请重新输入密钥。');
+      const credential = key || savedKey || '';
+      validateKey(credential);
+      await confirmHttp(url, '仍然获取模型');
+      return fetchProviderModels(url, credential);
     });
     if (!saved) return;
     this.update();
@@ -268,7 +278,12 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.WebviewViewProv
       officialModel = await this.configureOfficialModel(ready);
       if (officialModel === undefined) return;
     }
-    const before = await runHelper(ready.binary, { ...this.request(ready, 'inspect'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, officialModel });
+    const { catalog, ...route } = provider;
+    const excluded = new Set(catalog?.excluded);
+    const targetProvider: HelperRequest['provider'] = provider.id === 'official' ? { id: 'official' } : {
+      ...route, visibleModels: catalog && [provider.model, ...catalog.available.filter(id => id !== provider.model && !excluded.has(id))]
+    };
+    const before = await runHelper(ready.binary, { ...this.request(ready, 'inspect'), provider: targetProvider, apiKey, officialModel });
     this.adoptTarget(ready, before);
     this.result = before;
     if (before.operations?.some(unfinished)) { this.update(); await this.recover(); return; }
@@ -289,7 +304,7 @@ class SwitchView implements vscode.TreeDataProvider<Row>, vscode.WebviewViewProv
       this.progress = '正在备份并切换'; this.update(); progress.report({ message: this.progress });
 
       this.operationUncertain = true;
-      const result = await runHelper(ready.binary, { ...this.request(ready, 'switch'), provider: provider.id === 'official' ? { id: 'official' } : provider, apiKey, journalKey, expectedConfigFingerprint: configFingerprint, officialModel, settingsFingerprint: settings?.fingerprint }, event => {
+      const result = await runHelper(ready.binary, { ...this.request(ready, 'switch'), provider: targetProvider, apiKey, journalKey, expectedConfigFingerprint: configFingerprint, officialModel, settingsFingerprint: settings?.fingerprint }, event => {
         this.progress = progressMessage(event); this.update(); progress.report({ message: this.progress });
       });
       if (!result.committed) throw new Error('切换结果尚未确认。请刷新并检查是否有待恢复的操作。');

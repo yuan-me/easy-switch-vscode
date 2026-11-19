@@ -26,9 +26,9 @@ fn run(secrets: &mut Vec<String>) -> Result<()> {
     );
     let mut input = String::new();
     std::io::stdin()
-        .take(1_048_577)
+        .take(4_194_305)
         .read_to_string(&mut input)?;
-    ensure!(input.len() <= 1_048_576, "请求超过大小限制");
+    ensure!(input.len() <= 4_194_304, "请求超过大小限制");
     let req: Request =
         serde_json::from_str(&input).map_err(|_| anyhow::anyhow!("切换请求格式无效"))?;
     if let Some(key) = &req.api_key {

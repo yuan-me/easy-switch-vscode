@@ -8,7 +8,7 @@
 
 1. 从 [GitHub Releases](https://github.com/yuan-me/easy-switch-vscode/releases/latest) 下载 `.vsix`。
 2. 用 Remote-SSH 连接 Linux 服务器，在该窗口运行“Extensions: Install from VSIX...”。确认 Easy Switch 和官方 Codex 都安装在 SSH 服务器端。
-3. 重载窗口，在 Easy Switch 侧边栏添加服务商。接口需要支持 Responses API。
+3. 重载窗口，在 Easy Switch 侧边栏添加服务商。填好 API 地址和密钥后，点击“获取模型列表”，勾选要在 Codex 中显示的模型，选一个作为默认模型。模型需支持 Responses API。保存后点击“切换并重载”生效。
 
 安装包同时包含 Linux x64 和 ARM64 工具，服务器无需编译 Rust。当前支持的官方 Codex 版本和已完成的测试见 [兼容性说明](extensions/vscode/COMPATIBILITY.md)。完整的配置、手动停止提醒和恢复步骤见 [使用说明](extensions/vscode/README.md)。
 

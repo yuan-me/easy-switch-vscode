@@ -73,6 +73,28 @@ test('failed metadata save restores previous key', async () => {
   assert.equal(await store.key(provider.id), 'before');
   assert.equal(store.list()[0].name, provider.name);
 });
+
+test('model choices survive reopening and invalid selections leave the previous list intact', async () => {
+  const state = new State(), secrets = new Secrets();
+  const store = await ProviderStore.open(state, secrets, '/home');
+  const catalog = {available: [provider.model, 'other', 'hidden'], excluded: ['hidden'], updatedAt: 1234};
+  await store.save({...provider, catalog}, 'synthetic');
+  for (const excluded of [[provider.model], [null], ['other', 'other']]) {
+    await assert.rejects(store.save({...provider, catalog: {...catalog, excluded}}), /模型列表/);
+  }
+  assert.deepEqual((await ProviderStore.open(state, secrets, '/home')).list()[0].catalog, catalog);
+});
+test('changing the API endpoint requires a new explicit key, equivalent URLs keep the saved key', async () => {
+  const store = await ProviderStore.open(new State(), new Secrets(), '/home');
+  await store.save(provider, 'original');
+  await store.save({ ...provider, baseUrl: 'https://EXAMPLE.com:443/v1/' });
+  const changed = { ...provider, baseUrl: 'https://example.com/other' };
+  await assert.rejects(store.save(changed), /重新输入密钥/);
+  assert.equal(await store.key(provider.id), 'original');
+  assert.equal(store.list()[0].baseUrl, 'https://EXAMPLE.com:443/v1/');
+  await store.save(changed, 'replacement');
+  assert.equal(await store.key(provider.id), 'replacement');
+});
 test('untrusted provider fields and secret input are rejected', async () => {
   assert.throws(() => validateProvider({ ...provider, baseUrl: 'https://user:secret@example.com/v1' }), /不能包含/);
   assert.throws(() => validateProvider({ ...provider, baseUrl: 'file:///tmp/config' }), /只支持/);

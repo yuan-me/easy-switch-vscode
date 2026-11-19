@@ -45,3 +45,22 @@ test('closing the editor cancels without saving', () => formTest(async p => {
   const result = p.editProviderForm(undefined, false, async () => assert.fail('saved'));
   p.close(); assert.equal(await result, false);
 }));
+
+test('model lookup can fail and retry without saving or returning the entered key to the page', () => formTest(async p => {
+  const request = { action: 'fetchModels', requestId: 1, baseUrl: ' https://example.test/v1 ', key: 'synthetic' };
+  let attempts = 0;
+  const result = p.editProviderForm(undefined, false, async () => assert.fail('lookup saved the form'), async (url, key) => {
+    assert.equal(url, request.baseUrl.trim());
+    assert.equal(key, request.key);
+    if (++attempts === 1) throw Error('HTTP 401');
+    return ['model-a'];
+  });
+  await p.receive(request);
+  await p.receive({ ...request, requestId: 2 });
+  assert.deepEqual(p.replies, [
+    { action: 'modelResult', requestId: 1, message: 'HTTP 401' },
+    { action: 'modelResult', requestId: 2, models: ['model-a'] }
+  ]);
+  await p.receive({ action: 'cancel' });
+  assert.equal(await result, false);
+}));
